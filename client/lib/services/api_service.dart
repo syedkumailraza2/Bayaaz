@@ -9,8 +9,8 @@ import '../models/suggestion_model.dart';
 
 // Change to your machine's IP when testing on a physical device
 // const String kBaseUrl = 'http://10.0.2.2:5000/api'; // Android emulator
-const String kBaseUrl = 'http://localhost:3000/api'; // iOS simulator
-// const String kBaseUrl = 'https://bayaaz.onrender.com/api'; // ngrok (physical device)
+// const String kBaseUrl = 'http://localhost:3000/api'; // iOS simulator
+const String kBaseUrl = 'https://bayaaz.onrender.com/api'; // ngrok (physical device)
 
 class ApiService {
   static Future<String?> _getToken() async {
