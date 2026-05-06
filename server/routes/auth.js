@@ -44,6 +44,7 @@ router.post('/login', async (req, res) => {
 
     const match = await user.comparePassword(password);
     if (!match) return res.status(401).json({ message: 'Invalid email or password' });
+console.log('Login Successful!!!');
 
     res.json({ token: signToken(user), user: userPayload(user) });
   } catch (err) {
