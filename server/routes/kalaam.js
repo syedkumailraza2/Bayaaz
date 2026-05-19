@@ -5,18 +5,56 @@ const auth = require('../middleware/auth');
 
 const router = express.Router();
 
-// GET /api/kalaams — all public kalaams (feed)
+// GET /api/kalaams — public feed with search, filter, and pagination
+//   q?: free-text (title, poet, tags, lines)
+//   tag?: exact tag match
+//   category?: nauha | marsiya | qasida | qata
+//   page?: 1-indexed (default 1)
+//   limit?: page size (default 20, max 100)
 router.get('/', async (req, res) => {
   try {
-    const { category } = req.query;
+    const {
+      q,
+      tag,
+      category,
+      page: pageRaw = '1',
+      limit: limitRaw = '20',
+    } = req.query;
+
+    const page = Math.max(1, parseInt(pageRaw, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(limitRaw, 10) || 20));
+
     const filter = { isPublic: true };
     if (category) filter.category = category;
+    if (tag) filter.tags = tag;
 
-    const kalaams = await Kalaam.find(filter)
-      .populate('author', 'name avatar')
-      .sort({ createdAt: -1 });
+    if (q && q.trim()) {
+      const escaped = q.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
+      filter.$or = [
+        { title: regex },
+        { poet: regex },
+        { tags: regex },
+        { 'content.lines': regex },
+      ];
+    }
 
-    res.json(kalaams);
+    const [items, total] = await Promise.all([
+      Kalaam.find(filter)
+        .populate('author', 'name avatar')
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit),
+      Kalaam.countDocuments(filter),
+    ]);
+
+    res.json({
+      items,
+      page,
+      limit,
+      total,
+      hasMore: page * limit < total,
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

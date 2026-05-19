@@ -4,7 +4,8 @@ import '../models/kalaam_model.dart';
 import '../providers/kalaam_provider.dart';
 
 class AddKalaamScreen extends StatefulWidget {
-  const AddKalaamScreen({super.key});
+  final KalaamModel? existing;
+  const AddKalaamScreen({super.key, this.existing});
 
   @override
   State<AddKalaamScreen> createState() => _AddKalaamScreenState();
@@ -15,41 +16,41 @@ class _AddKalaamScreenState extends State<AddKalaamScreen> {
   final _titleController = TextEditingController();
   final _poetController = TextEditingController();
   final _tagsController = TextEditingController();
+  final _contentController = TextEditingController();
   String _category = kKalaamCategories.first;
   bool _isPublic = true;
   bool _submitting = false;
 
-  // Each stanza is a list of line controllers
-  final List<List<TextEditingController>> _stanzas = [];
+  KalaamModel? get _existing =>
+      widget.existing ?? ModalRoute.of(context)?.settings.arguments as KalaamModel?;
+
+  bool get _isEditing => _existing != null;
 
   @override
   void initState() {
     super.initState();
-    _addStanza(); // start with one stanza
+    // Defer to didChangeDependencies for ModalRoute access
   }
 
-  void _addStanza() {
-    setState(() {
-      _stanzas.add([TextEditingController()]);
-    });
-  }
-
-  void _removeStanza(int stanzaIndex) {
-    setState(() {
-      for (final c in _stanzas[stanzaIndex]) { c.dispose(); }
-      _stanzas.removeAt(stanzaIndex);
-    });
-  }
-
-  void _addLine(int stanzaIndex) {
-    setState(() => _stanzas[stanzaIndex].add(TextEditingController()));
-  }
-
-  void _removeLine(int stanzaIndex, int lineIndex) {
-    setState(() {
-      _stanzas[stanzaIndex][lineIndex].dispose();
-      _stanzas[stanzaIndex].removeAt(lineIndex);
-    });
+  bool _prefilled = false;
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_prefilled) return;
+    final existing = _existing;
+    if (existing == null) {
+      _prefilled = true;
+      return;
+    }
+    _titleController.text = existing.title;
+    _poetController.text = existing.poet ?? '';
+    _tagsController.text = existing.tags.join(', ');
+    _contentController.text = existing.content
+        .map((s) => s.lines.join('\n'))
+        .join('\n\n');
+    _category = existing.category;
+    _isPublic = existing.isPublic;
+    _prefilled = true;
   }
 
   @override
@@ -57,31 +58,42 @@ class _AddKalaamScreenState extends State<AddKalaamScreen> {
     _titleController.dispose();
     _poetController.dispose();
     _tagsController.dispose();
-    for (final stanza in _stanzas) {
-      for (final c in stanza) { c.dispose(); }
-    }
+    _contentController.dispose();
     super.dispose();
   }
 
   List<Map<String, dynamic>> _buildContent() {
-    return _stanzas.asMap().entries.map((entry) {
-      final lines = entry.value
-          .map((c) => c.text.trim())
+    final text = _contentController.text
+        .replaceAll('\r\n', '\n')
+        .replaceAll('\r', '\n')
+        .trim();
+    if (text.isEmpty) return [];
+
+    final chunks = text
+        .split(RegExp(r'\n[ \t]*\n+'))
+        .map((c) => c.trim())
+        .where((c) => c.isNotEmpty)
+        .toList();
+
+    final stanzas = <Map<String, dynamic>>[];
+    for (final chunk in chunks) {
+      final lines = chunk
+          .split('\n')
+          .map((l) => l.trim())
           .where((l) => l.isNotEmpty)
           .toList();
-      return {'stanzaNumber': entry.key + 1, 'lines': lines};
-    }).where((s) => (s['lines'] as List).isNotEmpty).toList();
+      if (lines.isEmpty) continue;
+      stanzas.add({'stanzaNumber': stanzas.length + 1, 'lines': lines});
+    }
+    return stanzas;
   }
-
-  bool _hasContent() => _stanzas.any(
-        (stanza) => stanza.any((c) => c.text.trim().isNotEmpty),
-      );
 
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
-    if (!_hasContent()) {
+    final content = _buildContent();
+    if (content.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Add at least one line of content'), backgroundColor: Colors.orange),
+        const SnackBar(content: Text('Paste the kalaam content'), backgroundColor: Colors.orange),
       );
       return;
     }
@@ -94,21 +106,39 @@ class _AddKalaamScreenState extends State<AddKalaamScreen> {
         .where((t) => t.isNotEmpty)
         .toList();
 
-    final success = await context.read<KalaamProvider>().addKalaam(
-          title: _titleController.text.trim(),
-          content: _buildContent(),
-          category: _category,
-          isPublic: _isPublic,
-          poet: _poetController.text.trim().isEmpty ? null : _poetController.text.trim(),
-          tags: parsedTags,
-        );
+    final provider = context.read<KalaamProvider>();
+    final existing = _existing;
+    final bool success;
+    if (existing != null) {
+      success = await provider.updateKalaam(
+        id: existing.id,
+        title: _titleController.text.trim(),
+        content: content,
+        category: _category,
+        isPublic: _isPublic,
+        poet: _poetController.text.trim().isEmpty ? null : _poetController.text.trim(),
+        tags: parsedTags,
+      );
+    } else {
+      success = await provider.addKalaam(
+        title: _titleController.text.trim(),
+        content: content,
+        category: _category,
+        isPublic: _isPublic,
+        poet: _poetController.text.trim().isEmpty ? null : _poetController.text.trim(),
+        tags: parsedTags,
+      );
+    }
 
     setState(() => _submitting = false);
     if (!mounted) return;
 
     if (success) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Kalaam saved!'), backgroundColor: Color(0xFF2d7a4f)),
+        SnackBar(
+          content: Text(_isEditing ? 'Kalaam updated!' : 'Kalaam saved!'),
+          backgroundColor: const Color(0xFF2d7a4f),
+        ),
       );
       Navigator.pop(context);
     } else {
@@ -125,7 +155,7 @@ class _AddKalaamScreenState extends State<AddKalaamScreen> {
       appBar: AppBar(
         backgroundColor: const Color(0xFF1a1a2e),
         foregroundColor: Colors.white,
-        title: const Text('Add Kalaam'),
+        title: Text(_isEditing ? 'Edit Kalaam' : 'Add Kalaam'),
         actions: [
           if (_submitting)
             const Padding(
@@ -177,45 +207,22 @@ class _AddKalaamScreenState extends State<AddKalaamScreen> {
             ),
             const SizedBox(height: 24),
             _FieldLabel('Content'),
-            const SizedBox(height: 12),
-            OutlinedButton.icon(
-              onPressed: _showPasteDialog,
-              icon: const Icon(Icons.content_paste, color: Color(0xFFe2b96f), size: 18),
-              label: const Text('Paste Full Kalaam', style: TextStyle(color: Color(0xFFe2b96f))),
-              style: OutlinedButton.styleFrom(
-                side: const BorderSide(color: Color(0xFFe2b96f)),
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-              ),
+            const SizedBox(height: 4),
+            const Text(
+              'Paste the full kalaam. Separate stanzas with a blank line.',
+              style: TextStyle(color: Colors.white54, fontSize: 12),
             ),
-            const SizedBox(height: 16),
-
-            // Stanzas
-            ..._stanzas.asMap().entries.map((stanzaEntry) {
-              final si = stanzaEntry.key;
-              final lineControllers = stanzaEntry.value;
-              return _StanzaEditor(
-                stanzaNumber: si + 1,
-                lineControllers: lineControllers,
-                canRemove: _stanzas.length > 1,
-                onAddLine: () => _addLine(si),
-                onRemoveLine: (li) => _removeLine(si, li),
-                onRemoveStanza: () => _removeStanza(si),
-              );
-            }),
-
-            const SizedBox(height: 12),
-            OutlinedButton.icon(
-              onPressed: _addStanza,
-              icon: const Icon(Icons.add, color: Color(0xFFe2b96f)),
-              label: const Text('Add Stanza', style: TextStyle(color: Color(0xFFe2b96f))),
-              style: OutlinedButton.styleFrom(
-                side: const BorderSide(color: Color(0xFFe2b96f)),
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-              ),
+            const SizedBox(height: 10),
+            TextFormField(
+              controller: _contentController,
+              style: const TextStyle(color: Colors.white, fontSize: 14, height: 1.6),
+              maxLines: null,
+              minLines: 12,
+              keyboardType: TextInputType.multiline,
+              textInputAction: TextInputAction.newline,
+              decoration: _inputDecoration('Paste your kalaam here…'),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 24),
             _VisibilityToggle(
               isPublic: _isPublic,
               onChanged: (v) => setState(() => _isPublic = v),
@@ -224,128 +231,6 @@ class _AddKalaamScreenState extends State<AddKalaamScreen> {
           ],
         ),
       ),
-    );
-  }
-
-  void _applyPastedText(String raw) {
-    // Normalize line endings
-    final text = raw.replaceAll('\r\n', '\n').replaceAll('\r', '\n').trim();
-    if (text.isEmpty) return;
-
-    // Split into stanza chunks by one or more blank lines
-    final chunks = text
-        .split(RegExp(r'\n[ \t]*\n+'))
-        .map((c) => c.trim())
-        .where((c) => c.isNotEmpty)
-        .toList();
-
-    if (chunks.isEmpty) return;
-
-    // Dispose existing controllers
-    for (final stanza in _stanzas) {
-      for (final c in stanza) c.dispose();
-    }
-
-    setState(() {
-      _stanzas.clear();
-      for (final chunk in chunks) {
-        final lines = chunk
-            .split('\n')
-            .map((l) => l.trim())
-            .where((l) => l.isNotEmpty)
-            .toList();
-        if (lines.isEmpty) continue;
-        final controllers = lines.map((l) {
-          final c = TextEditingController(text: l);
-          return c;
-        }).toList();
-        _stanzas.add(controllers);
-      }
-      // Ensure at least one stanza
-      if (_stanzas.isEmpty) _stanzas.add([TextEditingController()]);
-    });
-  }
-
-  void _showPasteDialog() {
-    final pasteController = TextEditingController();
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: const Color(0xFF1a1a2e),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (ctx) {
-        return Padding(
-          padding: EdgeInsets.only(
-            left: 20, right: 20, top: 24,
-            bottom: MediaQuery.of(ctx).viewInsets.bottom + 24,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('Paste Kalaam Text',
-                  style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 4),
-              const Text('Separate stanzas with a blank line',
-                  style: TextStyle(color: Colors.white54, fontSize: 12)),
-              const SizedBox(height: 16),
-              TextField(
-                controller: pasteController,
-                style: const TextStyle(color: Colors.white, fontSize: 14, height: 1.6),
-                maxLines: 12,
-                minLines: 6,
-                decoration: InputDecoration(
-                  hintText: 'Paste your kalaam here…',
-                  hintStyle: const TextStyle(color: Colors.white24, fontSize: 13),
-                  filled: true,
-                  fillColor: const Color(0xFF0f0f1a),
-                  border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: const BorderSide(color: Colors.white12)),
-                  enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: const BorderSide(color: Colors.white12)),
-                  focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: const BorderSide(color: Color(0xFFe2b96f))),
-                ),
-              ),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () => Navigator.pop(ctx),
-                      style: OutlinedButton.styleFrom(
-                        side: const BorderSide(color: Colors.white24),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                      ),
-                      child: const Text('Cancel', style: TextStyle(color: Colors.white54)),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: ElevatedButton(
-                      onPressed: () {
-                        Navigator.pop(ctx);
-                        _applyPastedText(pasteController.text);
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFFe2b96f),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                      ),
-                      child: const Text('Parse & Apply',
-                          style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        );
-      },
     );
   }
 
@@ -358,120 +243,6 @@ class _AddKalaamScreenState extends State<AddKalaamScreen> {
         enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Colors.white12)),
         focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Color(0xFFe2b96f))),
       );
-}
-
-class _StanzaEditor extends StatelessWidget {
-  final int stanzaNumber;
-  final List<TextEditingController> lineControllers;
-  final bool canRemove;
-  final VoidCallback onAddLine;
-  final void Function(int) onRemoveLine;
-  final VoidCallback onRemoveStanza;
-
-  const _StanzaEditor({
-    required this.stanzaNumber,
-    required this.lineControllers,
-    required this.canRemove,
-    required this.onAddLine,
-    required this.onRemoveLine,
-    required this.onRemoveStanza,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1a1a2e),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white12),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Stanza header
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 10, 8, 8),
-            child: Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFe2b96f).withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Text(
-                    'Stanza $stanzaNumber',
-                    style: const TextStyle(color: Color(0xFFe2b96f), fontSize: 12, fontWeight: FontWeight.bold),
-                  ),
-                ),
-                const Spacer(),
-                if (canRemove)
-                  GestureDetector(
-                    onTap: onRemoveStanza,
-                    child: const Icon(Icons.remove_circle_outline, color: Colors.redAccent, size: 18),
-                  ),
-              ],
-            ),
-          ),
-          const Divider(color: Colors.white12, height: 1),
-          // Lines
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-            child: Column(
-              children: [
-                ...lineControllers.asMap().entries.map((entry) {
-                  final li = entry.key;
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: Row(
-                      children: [
-                        SizedBox(width: 16, child: Text('${li + 1}', style: const TextStyle(color: Colors.white24, fontSize: 12))),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: TextField(
-                            controller: entry.value,
-                            style: const TextStyle(color: Colors.white, fontSize: 14, height: 1.4),
-                            decoration: InputDecoration(
-                              hintText: 'Line ${li + 1}',
-                              hintStyle: const TextStyle(color: Colors.white24, fontSize: 13),
-                              isDense: true,
-                              contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                              filled: true,
-                              fillColor: const Color(0xFF0f0f1a),
-                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Colors.white12)),
-                              enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Colors.white12)),
-                              focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFFe2b96f))),
-                            ),
-                          ),
-                        ),
-                        if (lineControllers.length > 1) ...[
-                          const SizedBox(width: 6),
-                          GestureDetector(
-                            onTap: () => onRemoveLine(li),
-                            child: const Icon(Icons.close, color: Colors.white24, size: 16),
-                          ),
-                        ],
-                      ],
-                    ),
-                  );
-                }),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: TextButton.icon(
-                    onPressed: onAddLine,
-                    icon: const Icon(Icons.add, size: 14, color: Colors.white38),
-                    label: const Text('Add line', style: TextStyle(color: Colors.white38, fontSize: 12)),
-                    style: TextButton.styleFrom(padding: EdgeInsets.zero, minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 class _FieldLabel extends StatelessWidget {

@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../config/app_config.dart';
 import '../providers/auth_provider.dart';
+import '../providers/connectivity_provider.dart';
 import '../providers/kalaam_provider.dart';
 import '../providers/group_provider.dart';
 import '../models/kalaam_model.dart';
 import '../widgets/kalaam_card.dart';
+import '../widgets/server_url_dialog.dart';
 import 'groups_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -79,19 +82,34 @@ class _HomeScreenState extends State<HomeScreen> {
 
 // ─── Feed Tab ────────────────────────────────────────────────────────────────
 
-class _FeedTab extends StatelessWidget {
+class _FeedTab extends StatefulWidget {
   const _FeedTab();
+
+  @override
+  State<_FeedTab> createState() => _FeedTabState();
+}
+
+class _FeedTabState extends State<_FeedTab> {
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<KalaamProvider>();
+    final isOnline = context.watch<ConnectivityProvider>().isOnline;
 
     return SafeArea(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (!isOnline) const _OfflineBanner(),
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+            padding: const EdgeInsets.fromLTRB(20, 20, 12, 0),
             child: Row(
               children: [
                 const Icon(Icons.auto_stories, color: Color(0xFFe2b96f)),
@@ -99,31 +117,35 @@ class _FeedTab extends StatelessWidget {
                 const Text('بیاض', style: TextStyle(fontSize: 22, color: Color(0xFFe2b96f), fontWeight: FontWeight.bold)),
                 const Spacer(),
                 IconButton(
+                  icon: const Icon(Icons.search, color: Colors.white70),
+                  onPressed: () => Navigator.pushNamed(context, '/search'),
+                ),
+                IconButton(
                   icon: const Icon(Icons.refresh, color: Colors.white54),
                   onPressed: () => context.read<KalaamProvider>().loadFeed(category: provider.selectedCategory),
                 ),
+                IconButton(
+                  tooltip: 'Server URL',
+                  icon: Icon(
+                    Icons.cloud_outlined,
+                    color: AppConfig.isOverridden
+                        ? const Color(0xFFe2b96f)
+                        : Colors.white54,
+                  ),
+                  onPressed: () async {
+                    final changed = await showServerUrlDialog(context);
+                    if (changed && mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Server URL updated. Restart the app to fully apply.'),
+                          duration: Duration(seconds: 3),
+                        ),
+                      );
+                      setState(() {});
+                    }
+                  },
+                ),
               ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-            child: GestureDetector(
-              onTap: () => Navigator.pushNamed(context, '/search'),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1a1a2e),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: Colors.white12),
-                ),
-                child: const Row(
-                  children: [
-                    Icon(Icons.search, color: Colors.white38, size: 18),
-                    SizedBox(width: 8),
-                    Text('Search kalaams, poets, lines…', style: TextStyle(color: Colors.white30, fontSize: 14)),
-                  ],
-                ),
-              ),
             ),
           ),
           _CategoryFilter(
@@ -138,10 +160,63 @@ class _FeedTab extends StatelessWidget {
                     : provider.feed.isEmpty
                         ? const Center(child: Text('No kalaams yet. Be the first!', style: TextStyle(color: Colors.white38)))
                         : ListView.builder(
+                            controller: _scrollController,
                             padding: const EdgeInsets.all(16),
-                            itemCount: provider.feed.length,
-                            itemBuilder: (ctx, i) => KalaamCard(kalaam: provider.feed[i]),
+                            itemCount: provider.feed.length + (provider.feedHasMore ? 1 : 0),
+                            itemBuilder: (ctx, i) {
+                              // Index-based prefetch: after item 17 (or feed.length-3,
+                              // whichever fires first) request the next page.
+                              if (provider.feedHasMore &&
+                                  i == provider.feed.length - 3 &&
+                                  i >= 0) {
+                                WidgetsBinding.instance.addPostFrameCallback((_) {
+                                  if (!mounted) return;
+                                  context.read<KalaamProvider>().loadMoreFeed();
+                                });
+                              }
+                              if (i >= provider.feed.length) {
+                                return const Padding(
+                                  padding: EdgeInsets.symmetric(vertical: 16),
+                                  child: Center(
+                                    child: SizedBox(
+                                      width: 22,
+                                      height: 22,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: Color(0xFFe2b96f),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }
+                              return KalaamCard(kalaam: provider.feed[i]);
+                            },
                           ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _OfflineBanner extends StatelessWidget {
+  const _OfflineBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      color: const Color(0xFF3a2a1a),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      child: const Row(
+        children: [
+          Icon(Icons.cloud_off, color: Color(0xFFe2b96f), size: 14),
+          SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Offline — showing cached kalaams',
+              style: TextStyle(color: Color(0xFFe2b96f), fontSize: 12),
+            ),
           ),
         ],
       ),
@@ -204,104 +279,144 @@ class _MyBayaazTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<KalaamProvider>();
-    final isLoading = provider.myLoading || provider.savedLoading;
 
-    return SafeArea(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
-            child: Row(
-              children: [
-                const Icon(Icons.bookmark, color: Color(0xFFe2b96f), size: 22),
-                const SizedBox(width: 8),
-                const Text('My Bayaaz', style: TextStyle(fontSize: 22, color: Colors.white, fontWeight: FontWeight.bold)),
-                const Spacer(),
-                IconButton(
-                  icon: const Icon(Icons.refresh, color: Colors.white54),
-                  onPressed: () {
-                    context.read<KalaamProvider>().loadMyKalaams();
-                    context.read<KalaamProvider>().loadSavedKalaams();
-                  },
-                ),
+    return DefaultTabController(
+      length: 2,
+      child: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
+              child: Row(
+                children: [
+                  const Icon(Icons.bookmark, color: Color(0xFFe2b96f), size: 22),
+                  const SizedBox(width: 8),
+                  const Text('My Bayaaz', style: TextStyle(fontSize: 22, color: Colors.white, fontWeight: FontWeight.bold)),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(Icons.refresh, color: Colors.white54),
+                    onPressed: () {
+                      context.read<KalaamProvider>().loadMyKalaams();
+                      context.read<KalaamProvider>().loadSavedKalaams();
+                    },
+                  ),
+                ],
+              ),
+            ),
+            const TabBar(
+              indicatorColor: Color(0xFFe2b96f),
+              indicatorWeight: 2.5,
+              labelColor: Color(0xFFe2b96f),
+              unselectedLabelColor: Colors.white54,
+              labelStyle: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, letterSpacing: 0.4),
+              unselectedLabelStyle: TextStyle(fontWeight: FontWeight.w500, fontSize: 13, letterSpacing: 0.4),
+              tabs: [
+                Tab(icon: Icon(Icons.edit_note, size: 18), text: 'My Kalaams'),
+                Tab(icon: Icon(Icons.bookmark_outline, size: 18), text: 'Saved'),
               ],
             ),
-          ),
-          Expanded(
-            child: isLoading
-                ? const Center(child: CircularProgressIndicator(color: Color(0xFFe2b96f)))
-                : ListView(
-                    padding: const EdgeInsets.all(16),
-                    children: [
-                      // ── My Kalaams section ──
-                      _SectionHeader(label: 'My Kalaams', icon: Icons.edit_note),
-                      const SizedBox(height: 8),
-                      if (provider.myError != null)
-                        _ErrorRow(message: provider.myError!)
-                      else if (provider.myKalaams.isEmpty)
-                        const _EmptyRow(message: 'No kalaams yet. Tap + to add one.')
-                      else
-                        ...provider.myKalaams.map((kalaam) => KalaamCard(
-                              kalaam: kalaam,
-                              showDeleteButton: true,
-                              showVisibilityToggle: true,
-                              onDelete: () async {
-                                final confirmed = await showDialog<bool>(
-                                  context: context,
-                                  builder: (_) => AlertDialog(
-                                    backgroundColor: const Color(0xFF1a1a2e),
-                                    title: const Text('Delete Kalaam', style: TextStyle(color: Colors.white)),
-                                    content: const Text('Are you sure?', style: TextStyle(color: Colors.white70)),
-                                    actions: [
-                                      TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-                                      TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('Delete', style: TextStyle(color: Colors.red))),
-                                    ],
-                                  ),
-                                );
-                                if (confirmed == true && context.mounted) {
-                                  context.read<KalaamProvider>().deleteKalaam(kalaam.id);
-                                }
-                              },
-                            )),
-
-                      const SizedBox(height: 24),
-
-                      // ── Saved section ──
-                      _SectionHeader(label: 'Saved', icon: Icons.bookmark_outline),
-                      const SizedBox(height: 8),
-                      if (provider.savedError != null)
-                        _ErrorRow(message: provider.savedError!)
-                      else if (provider.savedKalaams.isEmpty)
-                        const _EmptyRow(message: 'No saved kalaams yet.\nTap the bookmark icon on any kalaam.')
-                      else
-                        ...provider.savedKalaams.map((kalaam) => KalaamCard(kalaam: kalaam)),
-
-                      const SizedBox(height: 16),
-                    ],
-                  ),
-          ),
-        ],
+            Expanded(
+              child: TabBarView(
+                children: [
+                  _MyKalaamsList(provider: provider),
+                  _SavedKalaamsList(provider: provider),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
-class _SectionHeader extends StatelessWidget {
-  final String label;
-  final IconData icon;
-  const _SectionHeader({required this.label, required this.icon});
+class _MyKalaamsList extends StatelessWidget {
+  final KalaamProvider provider;
+  const _MyKalaamsList({required this.provider});
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Icon(icon, size: 16, color: const Color(0xFFe2b96f)),
-        const SizedBox(width: 6),
-        Text(label, style: const TextStyle(color: Color(0xFFe2b96f), fontSize: 13, fontWeight: FontWeight.w600, letterSpacing: 0.5)),
-        const SizedBox(width: 8),
-        const Expanded(child: Divider(color: Colors.white12)),
-      ],
+    if (provider.myLoading && provider.myKalaams.isEmpty) {
+      return const Center(child: CircularProgressIndicator(color: Color(0xFFe2b96f)));
+    }
+    if (provider.myError != null && provider.myKalaams.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.all(24),
+        child: Center(child: _ErrorRow(message: provider.myError!)),
+      );
+    }
+    if (provider.myKalaams.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.all(24),
+        child: Center(
+          child: _EmptyRow(message: 'No kalaams yet. Tap + to add one.'),
+        ),
+      );
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+      itemCount: provider.myKalaams.length,
+      itemBuilder: (ctx, i) {
+        final kalaam = provider.myKalaams[i];
+        return KalaamCard(
+          kalaam: kalaam,
+          showDeleteButton: true,
+          showEditButton: true,
+          showVisibilityToggle: true,
+          onDelete: () async {
+            final confirmed = await showDialog<bool>(
+              context: context,
+              builder: (_) => AlertDialog(
+                backgroundColor: const Color(0xFF1a1a2e),
+                title: const Text('Delete Kalaam', style: TextStyle(color: Colors.white)),
+                content: const Text('Are you sure?', style: TextStyle(color: Colors.white70)),
+                actions: [
+                  TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+                  TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('Delete', style: TextStyle(color: Colors.red))),
+                ],
+              ),
+            );
+            if (confirmed == true && context.mounted) {
+              context.read<KalaamProvider>().deleteKalaam(kalaam.id);
+            }
+          },
+        );
+      },
+    );
+  }
+}
+
+class _SavedKalaamsList extends StatelessWidget {
+  final KalaamProvider provider;
+  const _SavedKalaamsList({required this.provider});
+
+  @override
+  Widget build(BuildContext context) {
+    if (provider.savedLoading && provider.savedKalaams.isEmpty) {
+      return const Center(child: CircularProgressIndicator(color: Color(0xFFe2b96f)));
+    }
+    if (provider.savedError != null && provider.savedKalaams.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.all(24),
+        child: Center(child: _ErrorRow(message: provider.savedError!)),
+      );
+    }
+    if (provider.savedKalaams.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.all(24),
+        child: Center(
+          child: _EmptyRow(
+            message: 'No saved kalaams yet.\nTap the bookmark icon on any kalaam.',
+          ),
+        ),
+      );
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+      itemCount: provider.savedKalaams.length,
+      itemBuilder: (ctx, i) =>
+          KalaamCard(kalaam: provider.savedKalaams[i]),
     );
   }
 }

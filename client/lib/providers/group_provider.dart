@@ -57,10 +57,35 @@ class GroupProvider extends ChangeNotifier {
     }
   }
 
-  Future<SessionModel?> startSession(String groupId) async {
+  Future<SessionModel?> startSession(
+    String groupId, {
+    String? loadFromSnapshotId,
+    List<String>? kalaamIds,
+  }) async {
+    return await ApiService.startSession(
+      groupId,
+      loadFromSnapshotId: loadFromSnapshotId,
+      kalaamIds: kalaamIds,
+    );
+  }
+
+  Future<List<QueueSnapshotSummary>> getQueueSnapshots(String groupId,
+      {int limit = 5}) async {
     try {
-      return await ApiService.startSession(groupId);
-    } catch (e) {
+      return await ApiService.getQueueSnapshots(groupId, limit: limit);
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<InviteCreatedResponse?> createInvite(
+    String groupId, {
+    required String type, // 'permanent' or 'guest'
+    int? ttlHours,
+  }) async {
+    try {
+      return await ApiService.createInvite(groupId, type: type, ttlHours: ttlHours);
+    } catch (_) {
       return null;
     }
   }

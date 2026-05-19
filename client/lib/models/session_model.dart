@@ -1,4 +1,5 @@
 import 'kalaam_model.dart';
+import 'queue_item_model.dart';
 
 class SessionModel {
   final String id;
@@ -10,9 +11,13 @@ class SessionModel {
   final int currentLine;
   final bool isActive;
   final bool isPlaying;
+  // Legacy flat list, kept for backwards compatibility with old screens.
+  // New code should read [queueItems] instead.
   final List<String> queue;
   final List<KalaamModel> queueKalaams;
   final int currentQueueIndex;
+  // New source of truth. Carries votes, addedBy, and pin metadata per item.
+  final List<SessionQueueItem> queueItems;
 
   SessionModel({
     required this.id,
@@ -27,6 +32,7 @@ class SessionModel {
     required this.queue,
     required this.queueKalaams,
     required this.currentQueueIndex,
+    this.queueItems = const [],
   });
 
   factory SessionModel.fromJson(Map<String, dynamic> json) {
@@ -34,31 +40,37 @@ class SessionModel {
     KalaamModel? kalam;
     final raw = json['currentKalamId'];
     if (raw is Map) {
-      kalamId = raw['_id'] ?? raw['id'];
+      kalamId = (raw['_id'] ?? raw['id'])?.toString();
       if (raw['content'] != null) {
-        kalam = KalaamModel.fromJson(raw as Map<String, dynamic>);
+        kalam = KalaamModel.fromJson(Map<String, dynamic>.from(raw));
       }
     } else if (raw is String) {
       kalamId = raw;
     }
 
-    final rawQueue = json['queue'] as List? ?? [];
+    final rawQueue = (json['queue'] as List?) ?? const [];
     final queueIds = <String>[];
     final queueKalaams = <KalaamModel>[];
     for (final item in rawQueue) {
       if (item is Map) {
-        final itemId = item['_id'] ?? item['id'] ?? '';
-        queueIds.add(itemId as String);
+        final itemId = (item['_id'] ?? item['id'] ?? '').toString();
+        queueIds.add(itemId);
         if (item['content'] != null) {
-          queueKalaams.add(KalaamModel.fromJson(item as Map<String, dynamic>));
+          queueKalaams.add(KalaamModel.fromJson(Map<String, dynamic>.from(item)));
         }
       } else if (item is String) {
         queueIds.add(item);
       }
     }
 
+    final rawItems = (json['queueItems'] as List?) ?? const [];
+    final queueItems = rawItems
+        .whereType<Map>()
+        .map((m) => SessionQueueItem.fromJson(Map<String, dynamic>.from(m)))
+        .toList();
+
     return SessionModel(
-      id: json['_id'] ?? json['id'] ?? '',
+      id: (json['_id'] ?? json['id'] ?? '').toString(),
       groupId: json['groupId']?.toString() ?? '',
       hostId: json['hostId']?.toString() ?? '',
       currentKalamId: kalamId,
@@ -70,6 +82,7 @@ class SessionModel {
       queue: queueIds,
       queueKalaams: queueKalaams,
       currentQueueIndex: json['currentQueueIndex'] ?? 0,
+      queueItems: queueItems,
     );
   }
 
@@ -86,6 +99,7 @@ class SessionModel {
     List<String>? queue,
     List<KalaamModel>? queueKalaams,
     int? currentQueueIndex,
+    List<SessionQueueItem>? queueItems,
   }) {
     return SessionModel(
       id: id ?? this.id,
@@ -100,6 +114,17 @@ class SessionModel {
       queue: queue ?? this.queue,
       queueKalaams: queueKalaams ?? this.queueKalaams,
       currentQueueIndex: currentQueueIndex ?? this.currentQueueIndex,
+      queueItems: queueItems ?? this.queueItems,
     );
+  }
+
+  /// Sorted view of [queueItems] using the same ordering rule the server uses.
+  List<SessionQueueItem> get sortedQueue => sortedQueueItems(queueItems);
+
+  bool myVoteOn(String kalaamId, String userId) {
+    for (final i in queueItems) {
+      if (i.kalaamId == kalaamId) return i.hasVoteFrom(userId);
+    }
+    return false;
   }
 }

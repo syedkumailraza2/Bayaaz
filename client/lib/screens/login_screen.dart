@@ -1,6 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../config/app_config.dart';
 import '../providers/auth_provider.dart';
+import '../services/deep_link_service.dart';
+import '../widgets/server_url_dialog.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -47,6 +52,8 @@ class _LoginScreenState extends State<LoginScreen> {
 
     if (success && mounted) {
       Navigator.pushReplacementNamed(context, '/home');
+      // Redeem any invite link the user opened while logged out.
+      unawaited(DeepLinkService.instance.consumePendingToken());
     }
   }
 
@@ -64,7 +71,34 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         ),
         child: SafeArea(
-          child: Center(
+          child: Stack(
+            children: [
+              Positioned(
+                top: 8,
+                right: 8,
+                child: IconButton(
+                  tooltip: 'Server URL',
+                  icon: Icon(
+                    Icons.cloud_outlined,
+                    color: AppConfig.isOverridden
+                        ? const Color(0xFFe2b96f)
+                        : Colors.white38,
+                  ),
+                  onPressed: () async {
+                    final changed = await showServerUrlDialog(context);
+                    if (changed && mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Server URL updated. Restart the app to fully apply.'),
+                          duration: Duration(seconds: 3),
+                        ),
+                      );
+                      setState(() {});
+                    }
+                  },
+                ),
+              ),
+              Center(
             child: SingleChildScrollView(
               padding: const EdgeInsets.symmetric(horizontal: 32),
               child: Form(
@@ -176,6 +210,8 @@ class _LoginScreenState extends State<LoginScreen> {
                 ),
               ),
             ),
+          ),
+            ],
           ),
         ),
       ),

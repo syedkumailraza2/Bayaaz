@@ -1,8 +1,17 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../models/kalaam_model.dart';
+import '../models/queue_item_model.dart';
 import '../models/session_model.dart';
 import '../models/suggestion_model.dart';
 import '../services/api_service.dart';
+import '../services/offline_sync_service.dart';
 import '../services/socket_service.dart';
+import 'connectivity_provider.dart';
 
 class SessionProvider extends ChangeNotifier {
   SessionModel? _session;
@@ -10,11 +19,75 @@ class SessionProvider extends ChangeNotifier {
   bool _loading = false;
   String? _error;
   String? _activeSessionId;
+  String? _currentUserId;
+
+  ConnectivityProvider? _connectivity;
+  StreamSubscription<bool>? _connectivitySub;
 
   SessionModel? get session => _session;
   List<SuggestionModel> get suggestions => List.unmodifiable(_suggestions);
   bool get loading => _loading;
   String? get error => _error;
+  String? get currentUserId => _currentUserId;
+
+  bool get isHost =>
+      _session != null && _currentUserId != null && _session!.hostId == _currentUserId;
+
+  // Socket.IO JSON ints can land as num — coerce defensively.
+  static int? _asInt(dynamic v) {
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    if (v is String) return int.tryParse(v);
+    return null;
+  }
+
+  /// Wired from main.dart via ChangeNotifierProxyProvider. We use the same
+  /// onChange stream the splash already subscribes to so we can refresh the
+  /// session room when connectivity returns.
+  void attachConnectivity(ConnectivityProvider c) {
+    if (identical(_connectivity, c)) return;
+    _connectivitySub?.cancel();
+    _connectivity = c;
+    _connectivitySub = c.onChange.listen((online) {
+      if (online) _onReconnect();
+    });
+  }
+
+  bool get _isOnline => _connectivity?.isOnline ?? true;
+
+  Future<void> _onReconnect() async {
+    final sid = _activeSessionId;
+    if (sid == null) return;
+    final socket = SocketService();
+    try {
+      await socket.connect();
+      socket.joinSession(sid);
+    } catch (_) {}
+    // Drain any session ops the user queued while offline. The server
+    // broadcasts after each drain step so other devices catch up too.
+    unawaited(OfflineSyncService.instance.drainPendingSessionOps());
+  }
+
+  /// Hydrate the session view from Isar so an offline open paints
+  /// immediately, before any network call.
+  Future<void> hydrateSessionFromCache(String sessionId) async {
+    final cached = await OfflineSyncService.instance.readCachedSession(sessionId);
+    if (cached == null) return;
+    _session = cached;
+    _activeSessionId = sessionId;
+    notifyListeners();
+  }
+
+  Future<void> _ensureUserId() async {
+    if (_currentUserId != null) return;
+    final prefs = await SharedPreferences.getInstance();
+    final userJson = prefs.getString('user');
+    if (userJson == null || userJson.isEmpty) return;
+    try {
+      final map = jsonDecode(userJson) as Map<String, dynamic>;
+      _currentUserId = (map['_id'] ?? map['id'])?.toString();
+    } catch (_) {}
+  }
 
   // ── Load & Socket ──────────────────────────────────────────────────────────
 
@@ -22,10 +95,20 @@ class SessionProvider extends ChangeNotifier {
     _loading = true;
     _error = null;
     notifyListeners();
+    await _ensureUserId();
+    // Paint from cache instantly while we hit the network.
+    await hydrateSessionFromCache(sessionId);
+
+    if (!_isOnline) {
+      _loading = false;
+      notifyListeners();
+      return;
+    }
+
     try {
       _session = await ApiService.getSession(sessionId);
       _activeSessionId = sessionId;
-      // Connect socket and join room
+      unawaited(OfflineSyncService.instance.mirrorSession(_session!));
       final socket = SocketService();
       await socket.connect();
       socket.joinSession(sessionId);
@@ -41,12 +124,12 @@ class SessionProvider extends ChangeNotifier {
   void _listenToSocket(String sessionId) {
     final socket = SocketService();
 
-    // Full state on join (for late joiners / reconnects)
     socket.on('session:joined', (data) {
       try {
         if (data is Map && data['session'] != null) {
           _session = SessionModel.fromJson(
               Map<String, dynamic>.from(data['session'] as Map));
+          unawaited(OfflineSyncService.instance.mirrorSession(_session!));
           notifyListeners();
         }
       } catch (_) {}
@@ -54,19 +137,36 @@ class SessionProvider extends ChangeNotifier {
 
     socket.on('session:kalamChanged', (data) {
       if (_session == null || data is! Map) return;
-      _session = _session!.copyWith(
-        currentKalamId: data['kalamId'] as String?,
-        currentStanza: data['stanza'] as int? ?? 0,
-        currentLine: data['line'] as int? ?? 0,
+      final newKalamId = data['kalamId']?.toString();
+      final stanza = _asInt(data['stanza']) ?? 0;
+      final line = _asInt(data['line']) ?? 0;
+      // Rebuild session directly so currentKalam (the populated full object)
+      // is dropped — otherwise the teleprompter renders the previous kalaam.
+      _session = SessionModel(
+        id: _session!.id,
+        groupId: _session!.groupId,
+        hostId: _session!.hostId,
+        currentKalamId: newKalamId ?? _session!.currentKalamId,
+        currentKalam: null,
+        currentStanza: stanza,
+        currentLine: line,
+        isActive: _session!.isActive,
+        isPlaying: _session!.isPlaying,
+        queue: _session!.queue,
+        queueKalaams: _session!.queueKalaams,
+        currentQueueIndex: _session!.currentQueueIndex,
+        queueItems: _session!.queueItems,
       );
       notifyListeners();
     });
 
     socket.on('session:stanzaChanged', (data) {
       if (_session == null || data is! Map) return;
+      final stanza = _asInt(data['stanza']) ?? _session!.currentStanza;
+      final line = _asInt(data['line']) ?? _session!.currentLine;
       _session = _session!.copyWith(
-        currentStanza: data['stanza'] as int? ?? _session!.currentStanza,
-        currentLine: data['line'] as int? ?? _session!.currentLine,
+        currentStanza: stanza,
+        currentLine: line,
       );
       notifyListeners();
     });
@@ -81,6 +181,24 @@ class SessionProvider extends ChangeNotifier {
 
     socket.on('session:queueUpdated', (data) {
       if (_session == null || data is! Map) return;
+      // New server: payload contains enriched queueItems. Old server: only
+      // a flat `queue` list. Prefer queueItems when present.
+      final rawItems = data['queueItems'];
+      if (rawItems is List) {
+        final items = rawItems
+            .whereType<Map>()
+            .map((m) => SessionQueueItem.fromJson(Map<String, dynamic>.from(m)))
+            .toList();
+        _session = _session!.copyWith(
+          queueItems: items,
+          queue: data['queue'] is List
+              ? (data['queue'] as List).map((e) => e.toString()).toList()
+              : _session!.queue,
+        );
+        unawaited(OfflineSyncService.instance.mirrorSession(_session!));
+        notifyListeners();
+        return;
+      }
       final rawQueue = data['queue'];
       if (rawQueue is List) {
         _session = _session!.copyWith(
@@ -150,7 +268,13 @@ class SessionProvider extends ChangeNotifier {
     _suggestions = [];
   }
 
-  // ── REST methods (unchanged) ───────────────────────────────────────────────
+  @override
+  void dispose() {
+    _connectivitySub?.cancel();
+    super.dispose();
+  }
+
+  // ── REST methods ───────────────────────────────────────────────────────────
 
   Future<bool> setKalam(String sessionId, String kalamId) async {
     try {
@@ -163,6 +287,12 @@ class SessionProvider extends ChangeNotifier {
   }
 
   Future<bool> setStanza(String sessionId, int stanza, int line) async {
+    if (!_isOnline) {
+      await OfflineSyncService.instance.stashOfflineLineAdvance(sessionId, stanza, line);
+      _session = _session?.copyWith(currentStanza: stanza, currentLine: line);
+      notifyListeners();
+      return true;
+    }
     try {
       _session = await ApiService.setStanza(sessionId, stanza, line);
       notifyListeners();
@@ -192,23 +322,73 @@ class SessionProvider extends ChangeNotifier {
     }
   }
 
-  Future<bool> addToQueue(String sessionId, String kalamId) async {
+  /// Add a kalaam (full model) to the queue. Pre-inserts an optimistic
+  /// pendingSync row so the UI updates instantly; the server response (or
+  /// the broadcasted `session:queueUpdated`) replaces it with the canonical
+  /// item.
+  Future<bool> addToQueue(String sessionId, KalaamModel kalaam) async {
+    await _ensureUserId();
+    final optimistic = SessionQueueItem.optimistic(
+      kalaam: kalaam,
+      addedById: _currentUserId ?? '',
+    );
+    final alreadyQueued =
+        _session?.queueItems.any((i) => i.kalaamId == kalaam.id) ?? false;
+    if (_session != null && !alreadyQueued) {
+      _session = _session!.copyWith(
+        queueItems: [..._session!.queueItems, optimistic],
+      );
+      notifyListeners();
+    }
+
+    if (!_isOnline) {
+      await OfflineSyncService.instance.stashOfflineQueueAdd(
+        sessionId,
+        kalaam,
+        _currentUserId ?? '',
+      );
+      return true;
+    }
+
     try {
-      _session = await ApiService.addToQueue(sessionId, kalamId);
+      _session = await ApiService.addToQueue(sessionId, kalaam.id);
+      unawaited(OfflineSyncService.instance.mirrorSession(_session!));
       notifyListeners();
       return true;
     } catch (e) {
-      return false;
+      // Online attempt failed mid-flight — stash so reconnect drains it,
+      // and keep the optimistic row visible.
+      await OfflineSyncService.instance.stashOfflineQueueAdd(
+        sessionId,
+        kalaam,
+        _currentUserId ?? '',
+      );
+      return true;
     }
   }
 
   Future<bool> removeFromQueue(String sessionId, String kalamId) async {
+    // Optimistic removal so UI updates instantly online or off.
+    if (_session != null) {
+      _session = _session!.copyWith(
+        queueItems: _session!.queueItems
+            .where((i) => i.kalaamId != kalamId)
+            .toList(),
+      );
+      notifyListeners();
+    }
+    if (!_isOnline) {
+      await OfflineSyncService.instance.stashOfflineRemove(sessionId, kalamId);
+      return true;
+    }
     try {
       _session = await ApiService.removeFromQueue(sessionId, kalamId);
+      unawaited(OfflineSyncService.instance.mirrorSession(_session!));
       notifyListeners();
       return true;
     } catch (e) {
-      return false;
+      await OfflineSyncService.instance.stashOfflineRemove(sessionId, kalamId);
+      return true;
     }
   }
 
@@ -231,6 +411,112 @@ class SessionProvider extends ChangeNotifier {
       return false;
     }
   }
+
+  // ── Voting / pinning / advance (new flow) ──────────────────────────────────
+
+  /// Toggle the current user's upvote on a queue item. Optimistic — the
+  /// broadcast `session:queueUpdated` will overwrite with the canonical state.
+  Future<bool> toggleVote(String sessionId, String kalaamId) async {
+    await _ensureUserId();
+    final uid = _currentUserId;
+    if (uid == null || _session == null) return false;
+
+    _session = _session!.copyWith(
+      queueItems: _session!.queueItems.map((i) {
+        if (i.kalaamId != kalaamId) return i;
+        final newVotes = Set<String>.from(i.votes);
+        if (!newVotes.add(uid)) newVotes.remove(uid);
+        return i.copyWith(votes: newVotes);
+      }).toList(),
+    );
+    notifyListeners();
+
+    if (!_isOnline) {
+      await OfflineSyncService.instance.stashOfflineVote(sessionId, kalaamId, uid);
+      return true;
+    }
+
+    try {
+      final socket = SocketService();
+      if (socket.isConnected) {
+        socket.emitVote(sessionId, kalaamId);
+        return true;
+      }
+      _session = await ApiService.voteOnQueueItem(sessionId, kalaamId);
+      unawaited(OfflineSyncService.instance.mirrorSession(_session!));
+      notifyListeners();
+      return true;
+    } catch (_) {
+      // Network blip — queue it for the next reconnect.
+      await OfflineSyncService.instance.stashOfflineVote(sessionId, kalaamId, uid);
+      return true;
+    }
+  }
+
+  Future<bool> pinItem(
+    String sessionId,
+    String kalaamId, {
+    required bool pinned,
+    int? pinPosition,
+  }) async {
+    if (!_isOnline) {
+      await OfflineSyncService.instance.stashOfflinePin(
+        sessionId,
+        kalaamId,
+        pinned: pinned,
+        pinPosition: pinPosition,
+      );
+      return true;
+    }
+    try {
+      final socket = SocketService();
+      if (socket.isConnected) {
+        socket.emitPinQueueItem(sessionId, kalaamId,
+            pinned: pinned, pinPosition: pinPosition);
+        return true;
+      }
+      _session = await ApiService.pinQueueItem(
+        sessionId,
+        kalaamId,
+        pinned: pinned,
+        pinPosition: pinPosition,
+      );
+      unawaited(OfflineSyncService.instance.mirrorSession(_session!));
+      notifyListeners();
+      return true;
+    } catch (_) {
+      await OfflineSyncService.instance.stashOfflinePin(
+        sessionId,
+        kalaamId,
+        pinned: pinned,
+        pinPosition: pinPosition,
+      );
+      return true;
+    }
+  }
+
+  Future<bool> advanceToNext(String sessionId) async {
+    if (!_isOnline) {
+      await OfflineSyncService.instance.stashOfflineAdvanceToNext(sessionId);
+      return true;
+    }
+    try {
+      final socket = SocketService();
+      if (socket.isConnected) {
+        socket.emitAdvanceToNext(sessionId);
+        return true;
+      }
+      _session = await ApiService.advanceToNext(sessionId);
+      unawaited(OfflineSyncService.instance.mirrorSession(_session!));
+      notifyListeners();
+      return true;
+    } catch (_) {
+      await OfflineSyncService.instance.stashOfflineAdvanceToNext(sessionId);
+      return true;
+    }
+  }
+
+  // ── Suggestions (legacy) ───────────────────────────────────────────────────
 
   Future<void> loadSuggestions(String sessionId) async {
     try {

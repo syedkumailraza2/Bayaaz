@@ -14,7 +14,12 @@ class GroupMember {
   factory GroupMember.fromJson(Map<String, dynamic> json, List<dynamic> roles) {
     final userId = json['_id'] ?? json['id'] ?? '';
     final roleEntry = roles.firstWhere(
-      (r) => r['userId'] == userId || r['userId']?['_id'] == userId,
+      (r) {
+        final ru = r['userId'];
+        if (ru == userId) return true;
+        if (ru is Map && ru['_id'] == userId) return true;
+        return false;
+      },
       orElse: () => {'role': 'member'},
     );
     return GroupMember(

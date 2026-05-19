@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/kalaam_model.dart';
@@ -14,53 +15,58 @@ class SearchScreen extends StatefulWidget {
 class _SearchScreenState extends State<SearchScreen> {
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _focusNode = FocusNode();
+  final ScrollController _scrollController = ScrollController();
 
   String _query = '';
   String? _selectedCategory;
   String? _selectedTag;
+  Timer? _debounce;
 
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_onScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _focusNode.requestFocus();
-      // Ensure feed is loaded
       final provider = context.read<KalaamProvider>();
+      // Ensure feed is loaded (powers the popular-tag panel)
       if (provider.feed.isEmpty && !provider.feedLoading) {
         provider.loadFeed();
       }
+      // Run an initial empty search so popular tags + default results render
+      provider.runSearch();
     });
   }
 
   @override
   void dispose() {
+    _debounce?.cancel();
+    _scrollController.removeListener(_onScroll);
+    _scrollController.dispose();
     _searchController.dispose();
     _focusNode.dispose();
     super.dispose();
   }
 
-  List<KalaamModel> _applyFilters(List<KalaamModel> feed) {
-    var result = feed;
-
-    if (_query.isNotEmpty) {
-      final q = _query.toLowerCase();
-      result = result.where((k) {
-        if (k.title.toLowerCase().contains(q)) return true;
-        if (k.poet != null && k.poet!.toLowerCase().contains(q)) return true;
-        return k.content
-            .any((s) => s.lines.any((l) => l.toLowerCase().contains(q)));
-      }).toList();
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    final pos = _scrollController.position;
+    if (pos.pixels >= pos.maxScrollExtent - 240) {
+      context.read<KalaamProvider>().loadMoreSearch();
     }
+  }
 
-    if (_selectedCategory != null) {
-      result = result.where((k) => k.category == _selectedCategory).toList();
-    }
+  void _scheduleSearch() {
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 300), _runSearch);
+  }
 
-    if (_selectedTag != null) {
-      result = result.where((k) => k.tags.contains(_selectedTag)).toList();
-    }
-
-    return result;
+  void _runSearch() {
+    context.read<KalaamProvider>().runSearch(
+          q: _query,
+          tag: _selectedTag,
+          category: _selectedCategory,
+        );
   }
 
   bool get _hasActiveFilters =>
@@ -73,14 +79,29 @@ class _SearchScreenState extends State<SearchScreen> {
       _selectedTag = null;
       _searchController.clear();
     });
+    _runSearch();
     _focusNode.requestFocus();
   }
 
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<KalaamProvider>();
-    final allTags = provider.feed.expand((k) => k.tags).toSet().toList()..sort();
-    final results = _applyFilters(provider.feed);
+
+    // Tag frequency from feed → popular tags
+    final tagCounts = <String, int>{};
+    for (final k in provider.feed) {
+      for (final tag in k.tags) {
+        tagCounts[tag] = (tagCounts[tag] ?? 0) + 1;
+      }
+    }
+    final popularTags = tagCounts.keys.toList()
+      ..sort((a, b) {
+        final byCount = tagCounts[b]!.compareTo(tagCounts[a]!);
+        return byCount != 0 ? byCount : a.compareTo(b);
+      });
+    final topPopularTags = popularTags.take(15).toList();
+
+    final results = provider.searchResults;
 
     return Scaffold(
       backgroundColor: const Color(0xFF0f0f1a),
@@ -102,15 +123,25 @@ class _SearchScreenState extends State<SearchScreen> {
             border: InputBorder.none,
             suffixIcon: _query.isNotEmpty
                 ? GestureDetector(
-                    onTap: () => setState(() {
-                      _query = '';
-                      _searchController.clear();
-                    }),
+                    onTap: () {
+                      setState(() {
+                        _query = '';
+                        _searchController.clear();
+                      });
+                      _runSearch();
+                    },
                     child: const Icon(Icons.close, color: Colors.white38, size: 18),
                   )
                 : null,
           ),
-          onChanged: (v) => setState(() => _query = v),
+          onChanged: (v) {
+            setState(() => _query = v);
+            _scheduleSearch();
+          },
+          onSubmitted: (_) {
+            _debounce?.cancel();
+            _runSearch();
+          },
           textInputAction: TextInputAction.search,
         ),
         actions: [
@@ -124,6 +155,29 @@ class _SearchScreenState extends State<SearchScreen> {
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // ── Popular tags (just below search bar) ─────────────────────
+          if (topPopularTags.isNotEmpty)
+            _FilterSection(
+              label: 'Popular tags',
+              child: SizedBox(
+                height: 36,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  children: topPopularTags
+                      .map((tag) => _FilterChip(
+                            label: tag,
+                            selected: _selectedTag == tag,
+                            onTap: () {
+                              setState(() => _selectedTag = _selectedTag == tag ? null : tag);
+                              _runSearch();
+                            },
+                          ))
+                      .toList(),
+                ),
+              ),
+            ),
+
           // ── Category filter ──────────────────────────────────────────
           _FilterSection(
             label: 'Type',
@@ -136,40 +190,25 @@ class _SearchScreenState extends State<SearchScreen> {
                   _FilterChip(
                     label: 'All',
                     selected: _selectedCategory == null,
-                    onTap: () => setState(() => _selectedCategory = null),
+                    onTap: () {
+                      setState(() => _selectedCategory = null);
+                      _runSearch();
+                    },
                   ),
                   ...kKalaamCategories.map((cat) => _FilterChip(
                         label: cat[0].toUpperCase() + cat.substring(1),
                         selected: _selectedCategory == cat,
                         color: _categoryColor(cat),
-                        onTap: () => setState(() =>
-                            _selectedCategory = _selectedCategory == cat ? null : cat),
+                        onTap: () {
+                          setState(() =>
+                              _selectedCategory = _selectedCategory == cat ? null : cat);
+                          _runSearch();
+                        },
                       )),
                 ],
               ),
             ),
           ),
-
-          // ── Tag filter (only when tags exist) ────────────────────────
-          if (allTags.isNotEmpty)
-            _FilterSection(
-              label: 'Tags',
-              child: SizedBox(
-                height: 36,
-                child: ListView(
-                  scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  children: allTags
-                      .map((tag) => _FilterChip(
-                            label: tag,
-                            selected: _selectedTag == tag,
-                            onTap: () => setState(() =>
-                                _selectedTag = _selectedTag == tag ? null : tag),
-                          ))
-                      .toList(),
-                ),
-              ),
-            ),
 
           const SizedBox(height: 4),
 
@@ -184,21 +223,30 @@ class _SearchScreenState extends State<SearchScreen> {
                   if (_query.isNotEmpty)
                     _ActivePill(
                       label: '"$_query"',
-                      onRemove: () => setState(() {
-                        _query = '';
-                        _searchController.clear();
-                      }),
+                      onRemove: () {
+                        setState(() {
+                          _query = '';
+                          _searchController.clear();
+                        });
+                        _runSearch();
+                      },
                     ),
                   if (_selectedCategory != null)
                     _ActivePill(
                       label: _selectedCategory![0].toUpperCase() +
                           _selectedCategory!.substring(1),
-                      onRemove: () => setState(() => _selectedCategory = null),
+                      onRemove: () {
+                        setState(() => _selectedCategory = null);
+                        _runSearch();
+                      },
                     ),
                   if (_selectedTag != null)
                     _ActivePill(
-                      label: '#$_selectedTag',
-                      onRemove: () => setState(() => _selectedTag = null),
+                      label: _selectedTag!,
+                      onRemove: () {
+                        setState(() => _selectedTag = null);
+                        _runSearch();
+                      },
                     ),
                 ],
               ),
@@ -208,27 +256,48 @@ class _SearchScreenState extends State<SearchScreen> {
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
             child: Text(
-              provider.feedLoading
+              provider.searchLoading
                   ? 'Loading…'
-                  : _hasActiveFilters
-                      ? '${results.length} result${results.length == 1 ? '' : 's'}'
-                      : '${provider.feed.length} kalaam${provider.feed.length == 1 ? '' : 's'}',
+                  : '${results.length} result${results.length == 1 ? '' : 's'}',
               style: const TextStyle(color: Colors.white38, fontSize: 12),
             ),
           ),
 
           // ── Results ──────────────────────────────────────────────────
           Expanded(
-            child: provider.feedLoading
+            child: provider.searchLoading && results.isEmpty
                 ? const Center(
                     child: CircularProgressIndicator(color: Color(0xFFe2b96f)))
-                : results.isEmpty
-                    ? _EmptyState(hasQuery: _hasActiveFilters)
-                    : ListView.builder(
-                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-                        itemCount: results.length,
-                        itemBuilder: (ctx, i) => KalaamCard(kalaam: results[i]),
-                      ),
+                : provider.searchError != null
+                    ? Center(
+                        child: Text(provider.searchError!,
+                            style: const TextStyle(color: Colors.redAccent)),
+                      )
+                    : results.isEmpty
+                        ? _EmptyState(hasQuery: _hasActiveFilters)
+                        : ListView.builder(
+                            controller: _scrollController,
+                            padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                            itemCount: results.length + (provider.searchHasMore ? 1 : 0),
+                            itemBuilder: (ctx, i) {
+                              if (i >= results.length) {
+                                return const Padding(
+                                  padding: EdgeInsets.symmetric(vertical: 16),
+                                  child: Center(
+                                    child: SizedBox(
+                                      width: 22,
+                                      height: 22,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: Color(0xFFe2b96f),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }
+                              return KalaamCard(kalaam: results[i]);
+                            },
+                          ),
           ),
         ],
       ),
@@ -378,7 +447,7 @@ class _EmptyState extends StatelessWidget {
           Text(
             hasQuery
                 ? 'No kalaams match your search'
-                : 'Start typing to search',
+                : 'Search for kalaams, poets, or lines',
             style: const TextStyle(color: Colors.white38, fontSize: 14),
           ),
           if (hasQuery) ...[

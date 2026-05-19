@@ -7,15 +7,23 @@ import '../providers/kalaam_provider.dart';
 class KalaamCard extends StatelessWidget {
   final KalaamModel kalaam;
   final bool showDeleteButton;
+  final bool showEditButton;
   final bool showVisibilityToggle;
   final VoidCallback? onDelete;
+
+  /// If provided, tap calls this callback instead of navigating to the
+  /// detail screen. Used by the queue picker bottom sheet so users select
+  /// a kalaam rather than open it.
+  final VoidCallback? onPick;
 
   const KalaamCard({
     super.key,
     required this.kalaam,
     this.showDeleteButton = false,
+    this.showEditButton = false,
     this.showVisibilityToggle = false,
     this.onDelete,
+    this.onPick,
   });
 
   @override
@@ -26,7 +34,7 @@ class KalaamCard extends StatelessWidget {
     final isSaved = context.watch<KalaamProvider>().isSaved(kalaam.id);
 
     return GestureDetector(
-      onTap: () => Navigator.pushNamed(context, '/kalaam', arguments: kalaam),
+      onTap: onPick ?? () => Navigator.pushNamed(context, '/kalaam', arguments: kalaam),
       child: Container(
         margin: const EdgeInsets.only(bottom: 14),
         decoration: BoxDecoration(
@@ -108,6 +116,14 @@ class KalaamCard extends StatelessWidget {
                         size: 18,
                         color: isSaved ? const Color(0xFFe2b96f) : Colors.white38,
                       ),
+                    ),
+                  ],
+                  // Edit button (owner only)
+                  if (showEditButton && isOwner) ...[
+                    const SizedBox(width: 8),
+                    GestureDetector(
+                      onTap: () => Navigator.pushNamed(context, '/edit', arguments: kalaam),
+                      child: const Icon(Icons.edit_outlined, size: 18, color: Color(0xFFe2b96f)),
                     ),
                   ],
                   // Delete button (owner only)

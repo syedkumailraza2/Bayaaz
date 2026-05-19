@@ -1,5 +1,6 @@
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:socket_io_client/socket_io_client.dart' as IO;
+import '../config/app_config.dart';
 
 class SocketService {
   static final SocketService _instance = SocketService._internal();
@@ -15,7 +16,7 @@ class SocketService {
     final prefs = await SharedPreferences.getInstance();
     final token = prefs.getString('token');
     _socket = IO.io(
-      'https://hue-conventicular-rosalyn.ngrok-free.dev',
+      AppConfig.socketUrl,
       IO.OptionBuilder()
           .setTransports(['polling', 'websocket'])
           .setAuth({'token': token ?? ''})
@@ -54,6 +55,29 @@ class SocketService {
         'suggestionId': suggestionId,
         'status': status,
       });
+
+  // Voting + queue control (new flow)
+  void emitVote(String sessionId, String kalaamId) => _socket?.emit(
+        'member:vote',
+        {'sessionId': sessionId, 'kalaamId': kalaamId},
+      );
+
+  void emitPinQueueItem(
+    String sessionId,
+    String kalaamId, {
+    required bool pinned,
+    int? pinPosition,
+  }) {
+    _socket?.emit('host:pinQueueItem', {
+      'sessionId': sessionId,
+      'kalaamId': kalaamId,
+      'pinned': pinned,
+      if (pinPosition != null) 'pinPosition': pinPosition,
+    });
+  }
+
+  void emitAdvanceToNext(String sessionId) =>
+      _socket?.emit('host:advanceToNext', {'sessionId': sessionId});
 
   // Listener registration
   void on(String event, void Function(dynamic) handler) =>

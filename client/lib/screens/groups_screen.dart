@@ -129,6 +129,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
         onPressed: _showCreateDialog,
         child: const Icon(Icons.add, color: Colors.black),
       ),
+    
     );
   }
 }

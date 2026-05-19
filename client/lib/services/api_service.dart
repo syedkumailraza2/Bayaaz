@@ -1,16 +1,16 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import '../config/app_config.dart';
 import '../models/kalaam_model.dart';
 import '../models/user_model.dart';
 import '../models/group_model.dart';
 import '../models/session_model.dart';
 import '../models/suggestion_model.dart';
 
-// Change to your machine's IP when testing on a physical device
-// const String kBaseUrl = 'http://10.0.2.2:5000/api'; // Android emulator
-// const String kBaseUrl = 'http://localhost:3000/api'; // iOS simulator
-const String kBaseUrl = 'https://bayaaz.onrender.com/api'; // ngrok (physical device)
+// Resolved from AppConfig (runtime override > --dart-define=BASE_URL > default).
+// Use the in-app Server URL dialog to change this without rebuilding.
+String get kBaseUrl => AppConfig.apiUrl;
 
 class ApiService {
   static Future<String?> _getToken() async {
@@ -69,14 +69,31 @@ class ApiService {
     }
   }
 
-  // Kalaams
-  static Future<List<KalaamModel>> getPublicKalaams({String? category}) async {
-    final uri = Uri.parse('$kBaseUrl/kalaams')
-        .replace(queryParameters: category != null ? {'category': category} : null);
+  // Kalaams — paginated search/filter feed
+  static Future<KalaamPage> getPublicKalaams({
+    String? category,
+    String? q,
+    String? tag,
+    int page = 1,
+    int limit = 20,
+  }) async {
+    final params = <String, String>{
+      'page': '$page',
+      'limit': '$limit',
+      if (category != null && category.isNotEmpty) 'category': category,
+      if (q != null && q.trim().isNotEmpty) 'q': q.trim(),
+      if (tag != null && tag.isNotEmpty) 'tag': tag,
+    };
+    final uri = Uri.parse('$kBaseUrl/kalaams').replace(queryParameters: params);
     final res = await http.get(uri, headers: await _authHeaders());
     if (res.statusCode == 200) {
-      final List data = jsonDecode(res.body);
-      return data.map((j) => KalaamModel.fromJson(j)).toList();
+      final body = jsonDecode(res.body);
+      // Tolerate the legacy array shape so old servers still work
+      if (body is List) {
+        final items = body.map((j) => KalaamModel.fromJson(j)).toList();
+        return KalaamPage(items: items, page: 1, limit: items.length, total: items.length, hasMore: false);
+      }
+      return KalaamPage.fromJson(body as Map<String, dynamic>);
     }
     throw Exception('Failed to load kalaams');
   }
@@ -115,6 +132,31 @@ class ApiService {
     );
     if (res.statusCode == 201) return KalaamModel.fromJson(jsonDecode(res.body));
     throw Exception(jsonDecode(res.body)['message'] ?? 'Failed to create kalaam');
+  }
+
+  static Future<KalaamModel> updateKalaam({
+    required String id,
+    required String title,
+    required List<Map<String, dynamic>> content,
+    required String category,
+    required bool isPublic,
+    String? poet,
+    List<String> tags = const [],
+  }) async {
+    final res = await http.put(
+      Uri.parse('$kBaseUrl/kalaams/$id'),
+      headers: await _authHeaders(),
+      body: jsonEncode({
+        'title': title,
+        'content': content,
+        'category': category,
+        'isPublic': isPublic,
+        if (poet != null && poet.isNotEmpty) 'poet': poet,
+        'tags': tags,
+      }),
+    );
+    if (res.statusCode == 200) return KalaamModel.fromJson(jsonDecode(res.body));
+    throw Exception(_parseBody(res)['message'] ?? 'Failed to update kalaam');
   }
 
   static Future<Map<String, dynamic>> toggleSave(String id) async {
@@ -192,9 +234,9 @@ class ApiService {
     final res = await http.get(
       Uri.parse('$kBaseUrl/groups/$id'),
       headers: await _authHeaders(),
-    );
+    ).timeout(const Duration(seconds: 15));
     if (res.statusCode == 200) return GroupModel.fromJson(jsonDecode(res.body));
-    throw Exception('Failed to load group');
+    throw Exception('Failed to load group (${res.statusCode})');
   }
 
   static Future<GroupModel> addMember(String groupId, String userId) async {
@@ -218,10 +260,18 @@ class ApiService {
 
   // ─── Sessions ─────────────────────────────────────────────────────────────
 
-  static Future<SessionModel> startSession(String groupId) async {
+  static Future<SessionModel> startSession(
+    String groupId, {
+    String? loadFromSnapshotId,
+    List<String>? kalaamIds,
+  }) async {
     final res = await http.post(
       Uri.parse('$kBaseUrl/groups/$groupId/sessions'),
       headers: await _authHeaders(),
+      body: jsonEncode({
+        if (loadFromSnapshotId != null) 'loadFromSnapshotId': loadFromSnapshotId,
+        if (kalaamIds != null && kalaamIds.isNotEmpty) 'kalaamIds': kalaamIds,
+      }),
     );
     if (res.statusCode == 201) return SessionModel.fromJson(jsonDecode(res.body));
     throw Exception(_parseBody(res)['message'] ?? 'Failed to start session');
@@ -284,6 +334,31 @@ class ApiService {
     if (res.statusCode != 200) {
       throw Exception('Failed to end session');
     }
+  }
+
+  /// Voice follow: upload a short audio chunk; server transcribes via Whisper,
+  /// fuzzy-matches against the current kalaam, and broadcasts the new line.
+  /// Returns the raw JSON: {ok, transcript, language_probability, match?, advanced}.
+  static Future<Map<String, dynamic>> postVoiceChunk({
+    required String sessionId,
+    required String audioPath,
+    String language = 'ur',
+    double minScore = 0.4,
+  }) async {
+    final token = await _getToken();
+    final uri = Uri.parse('$kBaseUrl/sessions/$sessionId/voice-chunk');
+    final req = http.MultipartRequest('POST', uri)
+      ..headers['ngrok-skip-browser-warning'] = 'true'
+      ..headers['Authorization'] = token != null ? 'Bearer $token' : ''
+      ..fields['language'] = language
+      ..fields['min_score'] = minScore.toString()
+      ..files.add(await http.MultipartFile.fromPath('audio', audioPath));
+    final streamed = await req.send().timeout(const Duration(seconds: 20));
+    final res = await http.Response.fromStream(streamed);
+    if (res.statusCode == 200) return _parseBody(res);
+    throw Exception(
+      _parseBody(res)['message'] ?? 'voice-chunk failed (${res.statusCode})',
+    );
   }
 
   static Future<SessionModel> addToQueue(String sessionId, String kalamId) async {
@@ -358,4 +433,178 @@ class ApiService {
     if (res.statusCode == 200) return SuggestionModel.fromJson(jsonDecode(res.body));
     throw Exception('Failed to update suggestion');
   }
+
+  // ─── Voting + advance ─────────────────────────────────────────────────────
+
+  static Future<SessionModel> voteOnQueueItem(
+      String sessionId, String kalaamId) async {
+    final res = await http.post(
+      Uri.parse('$kBaseUrl/sessions/$sessionId/queue/$kalaamId/vote'),
+      headers: await _authHeaders(),
+    );
+    if (res.statusCode == 200) return SessionModel.fromJson(jsonDecode(res.body));
+    throw Exception(_parseBody(res)['message'] ?? 'Failed to vote');
+  }
+
+  static Future<SessionModel> pinQueueItem(
+    String sessionId,
+    String kalaamId, {
+    required bool pinned,
+    int? pinPosition,
+  }) async {
+    final res = await http.patch(
+      Uri.parse('$kBaseUrl/sessions/$sessionId/queue/$kalaamId/pin'),
+      headers: await _authHeaders(),
+      body: jsonEncode({
+        'pinned': pinned,
+        if (pinPosition != null) 'pinPosition': pinPosition,
+      }),
+    );
+    if (res.statusCode == 200) return SessionModel.fromJson(jsonDecode(res.body));
+    throw Exception(_parseBody(res)['message'] ?? 'Failed to pin queue item');
+  }
+
+  static Future<SessionModel> advanceToNext(String sessionId) async {
+    final res = await http.post(
+      Uri.parse('$kBaseUrl/sessions/$sessionId/advance'),
+      headers: await _authHeaders(),
+    );
+    if (res.statusCode == 200) return SessionModel.fromJson(jsonDecode(res.body));
+    throw Exception(_parseBody(res)['message'] ?? 'Failed to advance');
+  }
+
+  // ─── Queue snapshots (history) ────────────────────────────────────────────
+
+  static Future<List<QueueSnapshotSummary>> getQueueSnapshots(String groupId,
+      {int limit = 10}) async {
+    final res = await http.get(
+      Uri.parse('$kBaseUrl/groups/$groupId/queue-snapshots?limit=$limit'),
+      headers: await _authHeaders(),
+    );
+    if (res.statusCode == 200) {
+      final List data = jsonDecode(res.body);
+      return data.map((j) => QueueSnapshotSummary.fromJson(j)).toList();
+    }
+    throw Exception('Failed to load queue snapshots');
+  }
+
+  // ─── Invites ──────────────────────────────────────────────────────────────
+
+  static Future<InviteCreatedResponse> createInvite(
+    String groupId, {
+    required String type, // 'permanent' or 'guest'
+    int? ttlHours,
+  }) async {
+    final res = await http.post(
+      Uri.parse('$kBaseUrl/groups/$groupId/invites'),
+      headers: await _authHeaders(),
+      body: jsonEncode({
+        'type': type,
+        if (ttlHours != null) 'ttlHours': ttlHours,
+      }),
+    );
+    if (res.statusCode == 201) {
+      return InviteCreatedResponse.fromJson(jsonDecode(res.body));
+    }
+    throw Exception(_parseBody(res)['message'] ?? 'Failed to create invite');
+  }
+
+  static Future<InviteRedeemResponse> redeemInvite(String token) async {
+    final res = await http.post(
+      Uri.parse('$kBaseUrl/invites/$token/redeem'),
+      headers: await _authHeaders(),
+    );
+    if (res.statusCode == 200) {
+      return InviteRedeemResponse.fromJson(jsonDecode(res.body));
+    }
+    throw Exception(_parseBody(res)['message'] ?? 'Failed to redeem invite');
+  }
+}
+
+class InviteCreatedResponse {
+  final String token;
+  final String type;
+  final DateTime expiresAt;
+  final String link;
+  InviteCreatedResponse({
+    required this.token,
+    required this.type,
+    required this.expiresAt,
+    required this.link,
+  });
+  factory InviteCreatedResponse.fromJson(Map<String, dynamic> j) =>
+      InviteCreatedResponse(
+        token: j['token'] as String,
+        type: j['type'] as String,
+        expiresAt: DateTime.parse(j['expiresAt'] as String),
+        link: j['link'] as String,
+      );
+}
+
+class InviteRedeemResponse {
+  final String type; // 'permanent' or 'guest'
+  final String groupId;
+  final String groupName;
+  final String? activeSessionId; // guest only
+  InviteRedeemResponse({
+    required this.type,
+    required this.groupId,
+    required this.groupName,
+    this.activeSessionId,
+  });
+  factory InviteRedeemResponse.fromJson(Map<String, dynamic> j) =>
+      InviteRedeemResponse(
+        type: j['type'] as String,
+        groupId: j['groupId'].toString(),
+        groupName: (j['groupName'] as String?) ?? '',
+        activeSessionId: j['activeSessionId']?.toString(),
+      );
+}
+
+class QueueSnapshotSummary {
+  final String id;
+  final DateTime createdAt;
+  final List<KalaamModel> items;
+  QueueSnapshotSummary({
+    required this.id,
+    required this.createdAt,
+    required this.items,
+  });
+  factory QueueSnapshotSummary.fromJson(Map<String, dynamic> j) {
+    final rawItems = (j['items'] as List?) ?? const [];
+    return QueueSnapshotSummary(
+      id: (j['_id'] ?? j['id']).toString(),
+      createdAt: DateTime.parse(j['createdAt'] as String),
+      items: rawItems
+          .whereType<Map>()
+          .map((m) => KalaamModel.fromJson(Map<String, dynamic>.from(m)))
+          .toList(),
+    );
+  }
+}
+
+class KalaamPage {
+  final List<KalaamModel> items;
+  final int page;
+  final int limit;
+  final int total;
+  final bool hasMore;
+
+  const KalaamPage({
+    required this.items,
+    required this.page,
+    required this.limit,
+    required this.total,
+    required this.hasMore,
+  });
+
+  factory KalaamPage.fromJson(Map<String, dynamic> json) => KalaamPage(
+        items: (json['items'] as List? ?? [])
+            .map((j) => KalaamModel.fromJson(j as Map<String, dynamic>))
+            .toList(),
+        page: json['page'] ?? 1,
+        limit: json['limit'] ?? 0,
+        total: json['total'] ?? 0,
+        hasMore: json['hasMore'] ?? false,
+      );
 }

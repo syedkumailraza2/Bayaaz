@@ -1,6 +1,11 @@
 const jwt = require('jsonwebtoken');
 const Session = require('../model/Session');
 const Suggestion = require('../model/Suggestion');
+const sessionsRoute = require('../routes/sessions');
+
+const QUEUE_ITEM_POPULATE = sessionsRoute.QUEUE_ITEM_POPULATE;
+const advanceSession = sessionsRoute.advanceSession;
+const emitQueueUpdated = sessionsRoute.emitQueueUpdated;
 
 module.exports = function attachSessionHandlers(io) {
   io.on('connection', (socket) => {
@@ -25,7 +30,8 @@ module.exports = function attachSessionHandlers(io) {
         socket.join(`session:${sessionId}`);
         const session = await Session.findById(sessionId)
           .populate('currentKalamId', 'title category content poet author')
-          .populate('queue', 'title category author');
+          .populate('queue', 'title category author')
+          .populate(QUEUE_ITEM_POPULATE);
         if (session) {
           socket.emit('session:joined', { session });
         }
@@ -40,8 +46,6 @@ module.exports = function attachSessionHandlers(io) {
     });
 
     // --- host:setKalam ---
-    // Client sends: { sessionId, kalamId }
-    // Only host may do this. Broadcast to all in room.
     socket.on('host:setKalam', async ({ sessionId, kalamId }) => {
       try {
         const session = await Session.findById(sessionId);
@@ -49,7 +53,6 @@ module.exports = function attachSessionHandlers(io) {
         if (session.hostId.toString() !== currentUserId) {
           return socket.emit('session:error', { message: 'Not the host' });
         }
-        // Find matching queue index
         const queueIndex = session.queue.findIndex(id => id.toString() === kalamId);
         session.currentKalamId = kalamId;
         session.currentStanza = 0;
@@ -62,8 +65,7 @@ module.exports = function attachSessionHandlers(io) {
       }
     });
 
-    // --- host:setStanza ---
-    // Client sends: { sessionId, stanza, line }
+    // --- host:setStanza --- (line-by-line cursor for the teleprompter)
     socket.on('host:setStanza', async ({ sessionId, stanza, line }) => {
       try {
         const session = await Session.findById(sessionId);
@@ -81,7 +83,6 @@ module.exports = function attachSessionHandlers(io) {
     });
 
     // --- host:setPlayState ---
-    // Client sends: { sessionId, isPlaying }
     socket.on('host:setPlayState', async ({ sessionId, isPlaying }) => {
       try {
         const session = await Session.findById(sessionId);
@@ -97,8 +98,8 @@ module.exports = function attachSessionHandlers(io) {
       }
     });
 
-    // --- host:queueUpdated ---
-    // Client sends: { sessionId, queue: ['id1', 'id2', ...] }
+    // --- host:queueUpdated --- LEGACY: accepts a flat [kalaamId] queue.
+    // New clients should use REST endpoints for vote/pin/reorder instead.
     socket.on('host:queueUpdated', async ({ sessionId, queue }) => {
       try {
         const session = await Session.findById(sessionId);
@@ -106,16 +107,90 @@ module.exports = function attachSessionHandlers(io) {
         if (session.hostId.toString() !== currentUserId) {
           return socket.emit('session:error', { message: 'Not the host' });
         }
-        session.queue = queue;
+        // Best-effort migration: treat each id as a pinned item in the given order.
+        const existingById = new Map(
+          session.queueItems.map(i => [i.kalaamId.toString(), i])
+        );
+        session.queueItems = queue.map((kid, idx) => {
+          const existing = existingById.get(kid.toString());
+          if (existing) {
+            existing.pinned = true;
+            existing.pinPosition = idx;
+            return existing;
+          }
+          return {
+            kalaamId: kid,
+            addedBy: currentUserId,
+            addedAt: new Date(),
+            votes: [],
+            pinned: true,
+            pinPosition: idx,
+          };
+        });
         await session.save();
-        io.to(`session:${sessionId}`).emit('session:queueUpdated', { queue });
+        await emitQueueUpdated(io, session);
       } catch (err) {
         socket.emit('session:error', { message: err.message });
       }
     });
 
-    // --- member:suggest ---
-    // Client sends: { sessionId, kalamId }
+    // --- member:vote --- toggle current user's upvote on a queue item
+    socket.on('member:vote', async ({ sessionId, kalaamId }) => {
+      try {
+        if (!currentUserId) return socket.emit('session:error', { message: 'Not authenticated' });
+        const session = await Session.findById(sessionId);
+        if (!session) return;
+        const item = session.queueItems.find(i => i.kalaamId.toString() === kalaamId);
+        if (!item) return socket.emit('session:error', { message: 'Queue item not found' });
+
+        const idx = item.votes.findIndex(v => v.toString() === currentUserId);
+        if (idx === -1) item.votes.push(currentUserId);
+        else item.votes.splice(idx, 1);
+
+        session.markModified('queueItems');
+        await session.save();
+        await emitQueueUpdated(io, session);
+      } catch (err) {
+        socket.emit('session:error', { message: err.message });
+      }
+    });
+
+    // --- host:pinQueueItem --- pin/unpin a single queue item
+    // Payload: { sessionId, kalaamId, pinned, pinPosition? }
+    socket.on('host:pinQueueItem', async ({ sessionId, kalaamId, pinned, pinPosition }) => {
+      try {
+        const session = await Session.findById(sessionId);
+        if (!session) return;
+        if (session.hostId.toString() !== currentUserId) {
+          return socket.emit('session:error', { message: 'Not the host' });
+        }
+        const item = session.queueItems.find(i => i.kalaamId.toString() === kalaamId);
+        if (!item) return socket.emit('session:error', { message: 'Queue item not found' });
+        item.pinned = !!pinned;
+        item.pinPosition = pinned ? (Number.isInteger(pinPosition) ? pinPosition : 0) : null;
+        session.markModified('queueItems');
+        await session.save();
+        await emitQueueUpdated(io, session);
+      } catch (err) {
+        socket.emit('session:error', { message: err.message });
+      }
+    });
+
+    // --- host:advanceToNext --- advance from current kalaam to sorted queue head
+    socket.on('host:advanceToNext', async ({ sessionId }) => {
+      try {
+        const session = await Session.findById(sessionId);
+        if (!session) return;
+        if (session.hostId.toString() !== currentUserId) {
+          return socket.emit('session:error', { message: 'Not the host' });
+        }
+        await advanceSession(session, io);
+      } catch (err) {
+        socket.emit('session:error', { message: err.message });
+      }
+    });
+
+    // --- member:suggest --- legacy suggestion flow
     socket.on('member:suggest', async ({ sessionId, kalamId }) => {
       try {
         if (!currentUserId) return socket.emit('session:error', { message: 'Not authenticated' });
@@ -135,8 +210,7 @@ module.exports = function attachSessionHandlers(io) {
       }
     });
 
-    // --- host:suggestionHandled ---
-    // Client sends: { sessionId, suggestionId, status: 'accepted'|'rejected' }
+    // --- host:suggestionHandled --- legacy accept/reject
     socket.on('host:suggestionHandled', async ({ sessionId, suggestionId, status }) => {
       try {
         const session = await Session.findById(sessionId);
@@ -149,9 +223,19 @@ module.exports = function attachSessionHandlers(io) {
         suggestion.status = status;
         await suggestion.save();
         if (status === 'accepted') {
-          session.queue.push(suggestion.kalamId);
-          await session.save();
-          io.to(`session:${sessionId}`).emit('session:queueUpdated', { queue: session.queue.map(id => id.toString()) });
+          const already = session.queueItems.some(
+            i => i.kalaamId.toString() === suggestion.kalamId.toString()
+          );
+          if (!already) {
+            session.queueItems.push({
+              kalaamId: suggestion.kalamId,
+              addedBy: suggestion.suggestedBy,
+              addedAt: new Date(),
+              votes: [],
+            });
+            await session.save();
+            await emitQueueUpdated(io, session);
+          }
         }
         io.to(`session:${sessionId}`).emit('session:suggestionHandled', { suggestionId, status });
       } catch (err) {
@@ -160,7 +244,7 @@ module.exports = function attachSessionHandlers(io) {
     });
 
     socket.on('disconnect', () => {
-      // No explicit cleanup needed — socket.io handles room cleanup on disconnect
+      // socket.io handles room cleanup on disconnect
     });
   });
 };
