@@ -31,5 +31,12 @@ dev_dependencies:
   isar_generator: ^3.1.0+1
   build_runner: ^2.4.13
 
+# `record 5.2.1` resolves `record_linux 0.7.2`, which doesn't implement
+# `startStream` from `record_platform_interface 1.5.0`. Dart's kernel
+# snapshot compiles every platform variant regardless of target, so the
+# stale Linux variant breaks iOS/Android builds. Pin the fixed version.
+dependency_overrides:
+  record_linux: ^1.3.0
+
 flutter:
   uses-material-design: true

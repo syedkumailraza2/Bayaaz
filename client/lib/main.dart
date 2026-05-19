@@ -10,12 +10,12 @@ import 'providers/kalaam_provider.dart';
 import 'providers/practice_provider.dart';
 import 'providers/group_provider.dart';
 import 'providers/session_provider.dart';
+import 'providers/theme_provider.dart';
 import 'screens/login_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/add_kalaam_screen.dart';
 import 'screens/kalaam_detail_screen.dart';
 import 'screens/practice_mode_screen.dart';
-import 'screens/search_screen.dart';
 import 'screens/group_detail_screen.dart';
 import 'screens/group_session_screen.dart';
 import 'screens/group_session_teleprompter.dart';
@@ -28,6 +28,7 @@ void main() async {
   runApp(
     MultiProvider(
       providers: [
+        ChangeNotifierProvider(create: (_) => ThemeProvider()),
         ChangeNotifierProvider(create: (_) => AuthProvider()),
         ChangeNotifierProvider(create: (_) => ConnectivityProvider()),
         ChangeNotifierProxyProvider<ConnectivityProvider, KalaamProvider>(
@@ -63,16 +64,33 @@ class BayaazApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Watch the theme provider so the whole app rebuilds when the user flips
+    // the sun/moon toggle. The colour palette below is shared across the
+    // redesigned screens (home, detail, practice, my-bayaaz, create).
+    final themeMode = context.watch<ThemeProvider>().mode;
+
     return MaterialApp(
       title: 'Bayaaz',
       debugShowCheckedModeBanner: false,
       navigatorKey: rootNavigatorKey,
-      theme: ThemeData.dark().copyWith(
-        colorScheme: const ColorScheme.dark(
-          primary: Color(0xFFe2b96f),
-          surface: Color(0xFF1a1a2e),
+      themeMode: themeMode,
+      theme: ThemeData(
+        brightness: Brightness.light,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF234547),
+          brightness: Brightness.light,
         ),
-        scaffoldBackgroundColor: const Color(0xFF0f0f1a),
+        scaffoldBackgroundColor: Colors.white,
+        useMaterial3: true,
+      ),
+      darkTheme: ThemeData(
+        brightness: Brightness.dark,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF234547),
+          brightness: Brightness.dark,
+        ),
+        scaffoldBackgroundColor: const Color(0xFF0A0A0A),
+        useMaterial3: true,
       ),
       home: const _SplashRouter(),
       routes: {
@@ -82,7 +100,6 @@ class BayaazApp extends StatelessWidget {
         '/edit': (_) => const AddKalaamScreen(),
         '/kalaam': (_) => const KalaamDetailScreen(),
         '/practice': (_) => const PracticeModeScreen(),
-        '/search': (_) => const SearchScreen(),
         '/group': (_) => const GroupDetailScreen(),
         '/session': (_) => const GroupSessionScreen(),
         '/group-teleprompter': (_) => const GroupSessionTeleprompter(),
@@ -102,43 +119,33 @@ class _SplashRouterState extends State<_SplashRouter>
     with SingleTickerProviderStateMixin {
   StreamSubscription<bool>? _connectivitySub;
   late final AnimationController _anim;
-  late final Animation<double> _topLine;
-  late final Animation<double> _writing;
-  late final Animation<double> _subtitle;
-  late final Animation<double> _bottomLine;
+  late final Animation<double> _titleFade;
+  late final Animation<double> _subtitleFade;
 
   @override
   void initState() {
     super.initState();
     _anim = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 2400),
+      duration: const Duration(milliseconds: 2200),
     );
-    _topLine = CurvedAnimation(
+    // Matches Figma keyframes 15:572 → 15:408: gradient holds, then title
+    // fades in, then subtitle a touch later.
+    _titleFade = CurvedAnimation(
       parent: _anim,
-      curve: const Interval(0.0, 0.20, curve: Curves.easeOut),
+      curve: const Interval(0.30, 0.65, curve: Curves.easeOut),
     );
-    // The writing reveal — uses easeInOut so the "pen" accelerates then
-    // settles, mimicking a calligrapher's hand.
-    _writing = CurvedAnimation(
+    _subtitleFade = CurvedAnimation(
       parent: _anim,
-      curve: const Interval(0.15, 0.78, curve: Curves.easeInOutCubic),
-    );
-    _subtitle = CurvedAnimation(
-      parent: _anim,
-      curve: const Interval(0.78, 0.92, curve: Curves.easeOut),
-    );
-    _bottomLine = CurvedAnimation(
-      parent: _anim,
-      curve: const Interval(0.85, 1.0, curve: Curves.easeOut),
+      curve: const Interval(0.55, 0.85, curve: Curves.easeOut),
     );
     _anim.forward();
     _bootstrap();
   }
 
   Future<void> _bootstrap() async {
-    // Keep the splash up for the full writing sequence even on instant boots.
-    final minSplash = Future<void>.delayed(const Duration(milliseconds: 2600));
+    // Keep the splash up for the full intro sequence even on instant boots.
+    final minSplash = Future<void>.delayed(const Duration(milliseconds: 2400));
 
     // 1. Open Isar before anything reads/writes the cache.
     try {
@@ -207,52 +214,59 @@ class _SplashRouterState extends State<_SplashRouter>
 
   @override
   Widget build(BuildContext context) {
-    const gold = Color(0xFFe2b96f);
+    // Figma 15:572 / 15:408 — teal gradient splash with orange-gradient
+    // wordmark and white Urdu welcome subtitle that fade in.
     return Scaffold(
       body: Container(
         decoration: const BoxDecoration(
-          gradient: RadialGradient(
-            center: Alignment.center,
-            radius: 1.1,
-            colors: [Color(0xFF1a1a2e), Color(0xFF0f0f1a)],
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xFF234547), Color(0xFF55A8AD)],
           ),
         ),
-        child: Center(
-          child: Directionality(
-            textDirection: TextDirection.rtl,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _AnimatedHairline(animation: _topLine, color: gold),
-                const SizedBox(height: 24),
-                _WritingText(
-                  text: 'بیاض',
-                  progress: _writing,
-                  style: const TextStyle(
-                    fontSize: 96,
-                    height: 1.1,
-                    color: gold,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 1.2,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                FadeTransition(
-                  opacity: _subtitle,
-                  child: Text(
-                    'Bayaaz',
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: gold.withValues(alpha: 0.7),
-                      letterSpacing: 6,
-                      fontWeight: FontWeight.w300,
+        child: SafeArea(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              // In Figma the title sits at ~40% of a 874px tall frame; the
+              // subtitle sits ~9% below it. Reproduce that proportionally so
+              // the layout holds on every device height.
+              final titleTop = constraints.maxHeight * 0.40;
+              return Stack(
+                children: [
+                  Positioned(
+                    top: titleTop,
+                    left: 0,
+                    right: 0,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        FadeTransition(
+                          opacity: _titleFade,
+                          child: const _GradientWordmark(),
+                        ),
+                        const SizedBox(height: 18),
+                        FadeTransition(
+                          opacity: _subtitleFade,
+                          child: const Text(
+                            'اسلام علیکم بیاز میں خوش آمدید',
+                            textDirection: TextDirection.rtl,
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 14,
+                              height: 1.0,
+                              color: Colors.white,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: -0.56,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                ),
-                const SizedBox(height: 24),
-                _AnimatedHairline(animation: _bottomLine, color: gold),
-              ],
-            ),
+                ],
+              );
+            },
           ),
         ),
       ),
@@ -260,66 +274,32 @@ class _SplashRouterState extends State<_SplashRouter>
   }
 }
 
-class _AnimatedHairline extends StatelessWidget {
-  final Animation<double> animation;
-  final Color color;
-  const _AnimatedHairline({required this.animation, required this.color});
+// "بیاض" rendered with the orange Figma gradient (#FDA43F → #FDBA55) using a
+// ShaderMask so the fill matches the source design exactly.
+class _GradientWordmark extends StatelessWidget {
+  const _GradientWordmark();
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: animation,
-      builder: (context, _) {
-        return Container(
-          width: 80 * animation.value,
-          height: 1,
-          color: color.withValues(alpha: 0.5),
-        );
-      },
-    );
-  }
-}
-
-// Reveals Urdu text right-to-left through a ShaderMask gradient, so the
-// glyphs appear to be drawn by an invisible pen. A soft alpha edge at the
-// writing frontier sells the "wet ink" feel without requiring SVG paths.
-class _WritingText extends StatelessWidget {
-  final String text;
-  final TextStyle style;
-  final Animation<double> progress;
-  const _WritingText({
-    required this.text,
-    required this.style,
-    required this.progress,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: progress,
-      builder: (context, _) {
-        final p = progress.value.clamp(0.0, 1.0);
-        return ShaderMask(
-          blendMode: BlendMode.dstIn,
-          shaderCallback: (rect) => LinearGradient(
-            begin: Alignment.centerRight,
-            end: Alignment.centerLeft,
-            stops: [
-              0.0,
-              (p - 0.04).clamp(0.0, 1.0),
-              p.clamp(0.0, 1.0),
-              1.0,
-            ],
-            colors: const [
-              Colors.white,
-              Colors.white,
-              Colors.transparent,
-              Colors.transparent,
-            ],
-          ).createShader(rect),
-          child: Text(text, style: style, textDirection: TextDirection.rtl),
-        );
-      },
+    return ShaderMask(
+      blendMode: BlendMode.srcIn,
+      shaderCallback: (rect) => const LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [Color(0xFFFDA43F), Color(0xFFFDBA55)],
+      ).createShader(rect),
+      child: const Text(
+        'بیاض',
+        textDirection: TextDirection.rtl,
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          fontSize: 64,
+          height: 1.0,
+          color: Colors.white, // masked to the gradient above
+          fontWeight: FontWeight.w500,
+          letterSpacing: -1.28,
+        ),
+      ),
     );
   }
 }

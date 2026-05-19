@@ -5,6 +5,9 @@ const userSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   password: { type: String, required: true },
+  // Public-readable URL for the user's avatar image. Optional; the client
+  // falls back to a coloured circle with the first letter of the name.
+  avatar: { type: String, trim: true, default: null },
   savedKalaams: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Kalaam' }],
 }, { timestamps: true });
 

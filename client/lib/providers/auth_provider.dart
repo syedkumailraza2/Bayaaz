@@ -72,6 +72,34 @@ class AuthProvider extends ChangeNotifier {
     _user = UserModel.fromJson(data['user']);
   }
 
+  /// Persists name and/or avatar URL changes. Pass `clearAvatar: true` to
+  /// drop the current avatar (the UI then falls back to the initial-letter
+  /// circle).
+  Future<bool> updateProfile({
+    String? name,
+    String? avatar,
+    bool clearAvatar = false,
+  }) async {
+    try {
+      final data = await ApiService.updateProfile(
+        name: name,
+        avatar: avatar,
+        clearAvatar: clearAvatar,
+      );
+      final userJson = data['user'] as Map<String, dynamic>;
+      _user = UserModel.fromJson(userJson);
+      // Refresh the cached session so a cold start keeps the new avatar.
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('user', jsonEncode(userJson));
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString().replaceAll('Exception: ', '');
+      notifyListeners();
+      return false;
+    }
+  }
+
   Future<void> signOut() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('token');
