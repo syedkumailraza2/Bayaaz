@@ -168,6 +168,50 @@ class ApiService {
     throw Exception('Failed to save kalaam');
   }
 
+  /// Toggles the current user's like on a kalaam. Returns
+  /// `{ liked: bool, likesCount: int }`.
+  static Future<Map<String, dynamic>> toggleLike(String id) async {
+    final res = await http.post(
+      Uri.parse('$kBaseUrl/kalaams/$id/like'),
+      headers: await _authHeaders(),
+    );
+    if (res.statusCode == 200) return jsonDecode(res.body);
+    throw Exception(_parseBody(res)['message'] ?? 'Failed to like kalaam');
+  }
+
+  /// Increments the read counter for a kalaam. Fire-and-forget — caller
+  /// should not block on the result. Returns `{ reads: int }` on success.
+  static Future<Map<String, dynamic>> recordView(String id) async {
+    final res = await http.post(
+      Uri.parse('$kBaseUrl/kalaams/$id/view'),
+    );
+    if (res.statusCode == 200) return jsonDecode(res.body);
+    throw Exception('Failed to record view');
+  }
+
+  /// Patches the signed-in user's profile. Pass `avatar: null` (with
+  /// `clearAvatar: true`) to remove the avatar.
+  static Future<Map<String, dynamic>> updateProfile({
+    String? name,
+    String? avatar,
+    bool clearAvatar = false,
+  }) async {
+    final body = <String, dynamic>{};
+    if (name != null) body['name'] = name;
+    if (clearAvatar) {
+      body['avatar'] = null;
+    } else if (avatar != null) {
+      body['avatar'] = avatar;
+    }
+    final res = await http.patch(
+      Uri.parse('$kBaseUrl/auth/me'),
+      headers: await _authHeaders(),
+      body: jsonEncode(body),
+    );
+    if (res.statusCode == 200) return jsonDecode(res.body);
+    throw Exception(_parseBody(res)['message'] ?? 'Failed to update profile');
+  }
+
   static Future<List<KalaamModel>> getSavedKalaams() async {
     final res = await http.get(
       Uri.parse('$kBaseUrl/kalaams/saved'),

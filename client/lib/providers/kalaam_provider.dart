@@ -483,6 +483,76 @@ class KalaamProvider extends ChangeNotifier {
     return null;
   }
 
+  /// Optimistically toggle the current user's like and reconcile with the
+  /// server. Returns the post-toggle liked state. On network failure the
+  /// optimistic update is rolled back.
+  Future<bool> toggleLike(String id) async {
+    final source = _findKalaamInMemory(id);
+    if (source == null) return false;
+
+    final willLike = !source.likedByMe;
+    final optimistic = source.copyWith(
+      likedByMe: willLike,
+      likesCount: (source.likesCount + (willLike ? 1 : -1)).clamp(0, 1 << 31),
+    );
+    _applyKalaamUpdate(optimistic);
+    notifyListeners();
+
+    if (!_isOnline) {
+      // Offline: roll back — likes require a round trip to be authoritative.
+      _applyKalaamUpdate(source);
+      notifyListeners();
+      return source.likedByMe;
+    }
+
+    try {
+      final result = await ApiService.toggleLike(id);
+      final liked = result['liked'] == true;
+      final count = (result['likesCount'] as num?)?.toInt() ?? optimistic.likesCount;
+      _applyKalaamUpdate(source.copyWith(likedByMe: liked, likesCount: count));
+      notifyListeners();
+      return liked;
+    } catch (_) {
+      _applyKalaamUpdate(source);
+      notifyListeners();
+      return source.likedByMe;
+    }
+  }
+
+  /// Records a detail-screen open. Fire-and-forget — bumps `reads` server-side
+  /// and patches every in-memory list so the UI counter feels live.
+  Future<void> recordView(String id) async {
+    final source = _findKalaamInMemory(id);
+    if (source == null) return;
+    // Optimistic bump so the user sees +1 immediately.
+    _applyKalaamUpdate(source.copyWith(reads: source.reads + 1));
+    notifyListeners();
+    if (!_isOnline) return;
+    try {
+      final result = await ApiService.recordView(id);
+      final reads = (result['reads'] as num?)?.toInt();
+      if (reads != null) {
+        final latest = _findKalaamInMemory(id);
+        if (latest != null) {
+          _applyKalaamUpdate(latest.copyWith(reads: reads));
+          notifyListeners();
+        }
+      }
+    } catch (_) {
+      // Counter is best-effort; keep the optimistic value.
+    }
+  }
+
+  /// Mirror an updated kalaam into every list that holds it. Used by the
+  /// engagement endpoints (like / view) so a single tap stays consistent
+  /// across feed, search, my-kalaams, and saved views.
+  void _applyKalaamUpdate(KalaamModel updated) {
+    _replaceInList(_feed, updated);
+    _replaceInList(_searchResults, updated);
+    _replaceInList(_savedKalaams, updated);
+    _replaceInList(_myKalaams, updated);
+  }
+
   Future<bool> toggleVisibility(String id) async {
     if (!_isOnline) return false;
     try {

@@ -1,11 +1,28 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:speech_to_text/speech_to_text.dart';
-import 'package:speech_to_text/speech_recognition_result.dart';
+import 'package:provider/provider.dart';
 import '../models/kalaam_model.dart';
-import 'practice_launcher_sheet.dart';
+import '../providers/auth_provider.dart';
+import '../providers/kalaam_provider.dart';
 
+// ─── Design tokens shared with home_screen.dart ─────────────────────────────
+// Kept colocated here so this screen renders standalone without importing the
+// home module just for tokens.
+const _kTeal = Color(0xFF234547);
+const _kTealDarkGradTop = Color(0xFF1B3739);
+const _kTealOnDark = Color(0xFF2E5B5E);
+const _kInkPrimary = Color(0xFF303030);
+const _kInkMuted = Color(0xFFA0A0A0);
+const _kSurfaceLight = Color(0xFFF2F2F2);
+const _kChipLightBg = Color(0xFFECECEC);
+const _kChipLightFg = Color(0xFF2D2D2D);
+const _kChipDarkBg = Color(0xFF1F1F1F);
+const _kChipDarkFg = Color(0xFFCFCFCF);
+const _kPageDark = Color(0xFF0A0A0A);
+const _kSurfaceDark = Color(0xFF1A1A1A);
+
+/// Read-only detail view of a kalaam, redesigned to match the new Figma
+/// tombstone hero + stats + CTA layout. Accepts the kalaam via
+/// `ModalRoute` arguments and adapts to the current [Theme.brightness].
 class KalaamDetailScreen extends StatefulWidget {
   const KalaamDetailScreen({super.key});
 
@@ -13,41 +30,25 @@ class KalaamDetailScreen extends StatefulWidget {
   State<KalaamDetailScreen> createState() => _KalaamDetailScreenState();
 }
 
-class _KalaamDetailScreenState extends State<KalaamDetailScreen> {
+class _KalaamDetailScreenState extends State<KalaamDetailScreen>
+    with SingleTickerProviderStateMixin {
   KalaamModel? _kalaam;
   bool _initialized = false;
+  late final AnimationController _entryController;
 
-  // Flat line representation for highlight + scroll
-  late final List<_DetailLine> _lines;
-  late final List<GlobalKey> _lineKeys;
-  late final List<int> _lineWordStarts;
-  late final List<int> _lineWordCounts;
-  late final List<String> _normalizedWords;
-  int _totalWords = 0;
-
-  // Voice mode
-  final SpeechToText _speech = SpeechToText();
-  bool _voiceAvailable = false;
-  bool _voiceMode = false;
-  bool _isListening = false;
-  int _sessionWordOffset = 0;
-  // Notifiers drive per-line/word updates without rebuilding the whole screen.
-  // -1 line = no active highlight.
-  final ValueNotifier<int> _currentLine = ValueNotifier<int>(-1);
-  final ValueNotifier<int> _currentWord = ValueNotifier<int>(0);
-  final ValueNotifier<double> _soundLevel = ValueNotifier<double>(0.0);
-
-  static final _listenOptions = SpeechListenOptions(
-    partialResults: true,
-    cancelOnError: false,
-    listenMode: ListenMode.dictation,
-    autoPunctuation: false,
-  );
-  static const _listenFor = Duration(minutes: 5);
-  static const _pauseFor = Duration(seconds: 10);
-
-  static final _diacritics = RegExp(r'[ؐ-ًؚ-ٰٟۖ-ۭ]');
-  static final _nonAlphaNum = RegExp(r"[^\p{L}\p{N}]+", unicode: true);
+  @override
+  void initState() {
+    super.initState();
+    _entryController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 650),
+    );
+    // Kick off the entry animation on the first frame so the screen fades in
+    // even before the route transition fully resolves.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _entryController.forward();
+    });
+  }
 
   @override
   void didChangeDependencies() {
@@ -55,662 +56,940 @@ class _KalaamDetailScreenState extends State<KalaamDetailScreen> {
     if (_initialized) return;
     _initialized = true;
     _kalaam = ModalRoute.of(context)!.settings.arguments as KalaamModel;
-    _buildLineMaps();
-    _initVoice();
-  }
-
-  void _buildLineMaps() {
-    _lines = <_DetailLine>[];
-    _lineWordStarts = <int>[];
-    _lineWordCounts = <int>[];
-    final normalized = <String>[];
-    int total = 0;
-    final stanzas = _kalaam!.content;
-    for (int si = 0; si < stanzas.length; si++) {
-      final stanza = stanzas[si];
-      for (int li = 0; li < stanza.lines.length; li++) {
-        final text = stanza.lines[li];
-        _lines.add(_DetailLine(
-          stanzaIndex: si,
-          lineIndex: li,
-          text: text,
-          isLastInStanza: li == stanza.lines.length - 1,
-        ));
-        _lineWordStarts.add(total);
-        final raw = text.trim();
-        final words = raw.isEmpty ? const <String>[] : raw.split(RegExp(r'\s+'));
-        _lineWordCounts.add(words.length);
-        total += words.length;
-        for (final w in words) {
-          normalized.add(_normalizeWord(w));
-        }
-      }
-    }
-    _normalizedWords = normalized;
-    _totalWords = total;
-    _lineKeys = List.generate(_lines.length, (_) => GlobalKey());
-  }
-
-  String _normalizeWord(String s) {
-    var out = s.toLowerCase();
-    out = out.replaceAll(_diacritics, '');
-    out = out.replaceAll(_nonAlphaNum, '');
-    return out;
-  }
-
-  int _levDistance(String a, String b) {
-    if (a == b) return 0;
-    if (a.isEmpty) return b.length;
-    if (b.isEmpty) return a.length;
-    final m = a.length, n = b.length;
-    var prev = List<int>.generate(n + 1, (i) => i);
-    var curr = List<int>.filled(n + 1, 0);
-    for (int i = 1; i <= m; i++) {
-      curr[0] = i;
-      for (int j = 1; j <= n; j++) {
-        final cost = a.codeUnitAt(i - 1) == b.codeUnitAt(j - 1) ? 0 : 1;
-        final del = prev[j] + 1;
-        final ins = curr[j - 1] + 1;
-        final sub = prev[j - 1] + cost;
-        var best = del < ins ? del : ins;
-        if (sub < best) best = sub;
-        curr[j] = best;
-      }
-      final tmp = prev;
-      prev = curr;
-      curr = tmp;
-    }
-    return prev[n];
-  }
-
-  bool _wordsMatch(String spoken, String kalaam) {
-    if (spoken.isEmpty || kalaam.isEmpty) return false;
-    if (spoken == kalaam) return true;
-    final maxLen = spoken.length > kalaam.length ? spoken.length : kalaam.length;
-    if (maxLen <= 3) return false;
-    if (spoken.startsWith(kalaam) || kalaam.startsWith(spoken)) {
-      final shortLen =
-          spoken.length < kalaam.length ? spoken.length : kalaam.length;
-      if (shortLen >= 3) return true;
-    }
-    final tolerance = (maxLen / 4).floor().clamp(1, 3);
-    return _levDistance(spoken, kalaam) <= tolerance;
-  }
-
-  Future<void> _initVoice() async {
-    _voiceAvailable = await _speech.initialize(
-      onError: (e) => debugPrint('STT error: $e'),
-      onStatus: (s) {
-        if (s == 'done' && _isListening && _voiceMode) _restartListening();
-      },
-    );
-    if (mounted) setState(() {});
-  }
-
-  void _startListening() {
-    if (!_voiceAvailable) return;
-    setState(() => _isListening = true);
-    _speech.listen(
-      onResult: _onSpeechResult,
-      onSoundLevelChange: (level) => _soundLevel.value = level,
-      listenFor: _listenFor,
-      pauseFor: _pauseFor,
-      listenOptions: _listenOptions,
-    );
-  }
-
-  void _restartListening() {
-    if (!_voiceMode || !mounted) return;
-    _speech.listen(
-      onResult: _onSpeechResult,
-      onSoundLevelChange: (level) => _soundLevel.value = level,
-      listenFor: _listenFor,
-      pauseFor: _pauseFor,
-      listenOptions: _listenOptions,
-    );
-  }
-
-  void _onSpeechResult(SpeechRecognitionResult result) {
-    if (!mounted || !_voiceMode) return;
-
-    final spoken = result.recognizedWords
-        .split(RegExp(r'\s+'))
-        .map(_normalizeWord)
-        .where((w) => w.isNotEmpty)
-        .toList(growable: false);
-    if (spoken.isEmpty) return;
-
-    const lookahead = 5;
-    int kPtr = _sessionWordOffset;
-    int lastMatched = -1;
-
-    for (final sw in spoken) {
-      if (kPtr >= _totalWords) break;
-      int found = -1;
-      final maxStep =
-          kPtr + lookahead < _totalWords ? lookahead : _totalWords - kPtr;
-      for (int step = 0; step < maxStep; step++) {
-        final kw = _normalizedWords[kPtr + step];
-        if (kw.isEmpty) continue;
-        if (_wordsMatch(sw, kw)) {
-          found = kPtr + step;
-          break;
-        }
-      }
-      if (found >= 0) {
-        lastMatched = found;
-        kPtr = found + 1;
-      }
-    }
-
-    if (result.finalResult) {
-      _sessionWordOffset = lastMatched >= 0
-          ? (lastMatched + 1).clamp(0, _totalWords)
-          : _sessionWordOffset;
-    }
-
-    if (lastMatched >= 0) {
-      _updatePositionFromWordCount(lastMatched);
-    }
-  }
-
-  void _updatePositionFromWordCount(int globalWord) {
-    for (int i = _lines.length - 1; i >= 0; i--) {
-      if (_lineWordStarts[i] <= globalWord) {
-        final wordInLine = (globalWord - _lineWordStarts[i])
-            .clamp(0, (_lineWordCounts[i] - 1).clamp(0, 999));
-        final lineChanged = _currentLine.value != i;
-        // Notifier writes are O(1) and only rebuild the lines that depend on
-        // the changed value — no full-screen rebuild on each STT partial.
-        _currentLine.value = i;
-        _currentWord.value = wordInLine;
-        if (lineChanged) {
-          WidgetsBinding.instance
-              .addPostFrameCallback((_) => _scrollToCurrentLine());
-        }
-        break;
-      }
-    }
-  }
-
-  void _scrollToCurrentLine() {
-    final idx = _currentLine.value;
-    if (idx < 0 || idx >= _lineKeys.length) return;
-    final ctx = _lineKeys[idx].currentContext;
-    if (ctx == null) return;
-    Scrollable.ensureVisible(
-      ctx,
-      duration: const Duration(milliseconds: 150),
-      alignment: 0.4,
-      curve: Curves.easeOutCubic,
-    );
-  }
-
-  void _stopListening() {
-    _speech.stop();
-    _soundLevel.value = 0.0;
-    setState(() => _isListening = false);
-  }
-
-  Future<void> _jumpToLine(int i) async {
-    if (i < 0 || i >= _lines.length) return;
-    if (!_voiceAvailable) return;
-    HapticFeedback.selectionClick();
-
-    _sessionWordOffset = _lineWordStarts[i];
-    if (!_voiceMode) {
-      setState(() => _voiceMode = true);
-    }
-    _currentLine.value = i;
-    _currentWord.value = 0;
-
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _scrollToCurrentLine();
-    });
-
-    // Reset the STT session so words spoken before the jump don't leak into
-    // the new position's match window. Guard against the onStatus('done')
-    // auto-restart by clearing _isListening before cancel.
-    if (_isListening) {
-      _isListening = false;
-      try {
-        await _speech.cancel();
-      } catch (_) {}
-    }
-    if (_voiceMode && mounted) {
-      _startListening();
-    }
-  }
-
-  void _toggleVoiceMode() {
-    setState(() => _voiceMode = !_voiceMode);
-    if (_voiceMode) {
-      _sessionWordOffset = 0;
-      _currentLine.value = 0;
-      _currentWord.value = 0;
-      _startListening();
-    } else {
-      _stopListening();
-      _currentLine.value = -1;
-      _currentWord.value = 0;
+    // Fire-and-forget read counter bump. The provider reconciles the in-memory
+    // lists optimistically so the count animates up immediately.
+    final id = _kalaam?.id;
+    if (id != null && id.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        context.read<KalaamProvider>().recordView(id);
+      });
     }
   }
 
   @override
   void dispose() {
-    if (_isListening) _speech.stop();
-    _soundLevel.dispose();
-    _currentLine.dispose();
-    _currentWord.dispose();
+    _entryController.dispose();
     super.dispose();
+  }
+
+  void _openPractice({required String mode}) {
+    final kalaam = _kalaam;
+    if (kalaam == null) return;
+    Navigator.pushNamed(
+      context,
+      '/practice',
+      arguments: <String, dynamic>{
+        'kalaam': kalaam,
+        'mode': mode,
+        'startStanza': 0,
+      },
+    );
+  }
+
+  void _openReadSheet() {
+    final kalaam = _kalaam;
+    if (kalaam == null) return;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      barrierColor: Colors.black.withValues(alpha: 0.45),
+      builder: (sheetCtx) => _ReadSheet(kalaam: kalaam, isDark: isDark),
+    );
+  }
+
+  Future<void> _toggleVisibility() async {
+    final kalaam = _kalaam;
+    if (kalaam == null) return;
+    final ok = await context.read<KalaamProvider>().toggleVisibility(kalaam.id);
+    if (!mounted) return;
+    if (!ok) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Couldn\'t update visibility. Try again.'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final kalaam = _kalaam;
-    if (kalaam == null) return const Scaffold(backgroundColor: Color(0xFF0f0f1a));
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg = isDark ? _kPageDark : Colors.white;
+
+    if (kalaam == null) {
+      return Scaffold(backgroundColor: bg);
+    }
+
+    final currentUserId = context.watch<AuthProvider>().user?.id;
+    final isOwner = kalaam.author.id == currentUserId;
+    // Watch so the toggle re-renders in place after toggleVisibility resolves.
+    final liveKalaam = context.select<KalaamProvider, KalaamModel>((p) {
+      for (final list in [p.feed, p.myKalaams, p.savedKalaams, p.searchResults]) {
+        for (final k in list) {
+          if (k.id == kalaam.id) return k;
+        }
+      }
+      return kalaam;
+    });
+
+    final cat = _CategoryGlyph.from(liveKalaam.category);
+    final size = MediaQuery.of(context).size;
+    final topInset = MediaQuery.of(context).padding.top;
+    // Tombstone target ~360px tall but never more than 46% of the viewport so
+    // the layout still breathes on shorter devices.
+    final heroHeight = (size.height * 0.46).clamp(320.0, 400.0);
 
     return Scaffold(
-      backgroundColor: const Color(0xFF0f0f1a),
-      appBar: AppBar(
-        backgroundColor: const Color(0xFF1a1a2e),
-        foregroundColor: Colors.white,
-        title: Text(
-          kalaam.category[0].toUpperCase() + kalaam.category.substring(1),
-          style: const TextStyle(color: Color(0xFFe2b96f)),
-        ),
-        actions: [
-          // if (isOwner)
-          //   IconButton(
-          //     tooltip: 'Edit',
-          //     icon: const Icon(Icons.edit_outlined, color: Color(0xFFe2b96f), size: 20),
-          //     onPressed: () => Navigator.pushReplacementNamed(
-          //       context,
-          //       '/edit',
-          //       arguments: kalaam,
-          //     ),
-          //   ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
-            child: _FollowVoiceButton(
-              voiceMode: _voiceMode,
-              voiceAvailable: _voiceAvailable,
-              onTap: _voiceAvailable ? _toggleVoiceMode : null,
-            ),
-          ),
-          TextButton.icon(
-            onPressed: () => showPracticeLauncher(context, kalaam),
-            icon: const Icon(Icons.school_outlined, color: Color(0xFFe2b96f), size: 18),
-            label: const Text('Practice', style: TextStyle(color: Color(0xFFe2b96f), fontSize: 13, fontWeight: FontWeight.w600)),
-          ),
-          Container(
-            margin: const EdgeInsets.only(right: 12),
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: kalaam.isPublic
-                  ? Colors.green.withValues(alpha: 0.2)
-                  : Colors.orange.withValues(alpha: 0.2),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  kalaam.isPublic ? Icons.public : Icons.lock_outline,
-                  size: 14,
-                  color: kalaam.isPublic ? Colors.greenAccent : Colors.orange,
-                ),
-                const SizedBox(width: 4),
-                Text(
-                  kalaam.isPublic ? 'Public' : 'Private',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: kalaam.isPublic ? Colors.greenAccent : Colors.orange,
+      backgroundColor: bg,
+      body: AnimatedBuilder(
+        animation: _entryController,
+        builder: (context, _) {
+          final t = _entryController.value;
+          // Whole-screen fade + slide-up to introduce the layout.
+          final overall = Curves.easeOut.transform(t.clamp(0.0, 1.0));
+          return Opacity(
+            opacity: overall,
+            child: Transform.translate(
+              offset: Offset(0, (1 - overall) * 12),
+              child: Stack(
+                children: [
+                  _Hero(
+                    height: heroHeight,
+                    topInset: topInset,
+                    glyph: cat.glyph,
+                    progress: _stagger(t, 0.0, 0.40),
                   ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-      body: Stack(
-        children: [
-          SingleChildScrollView(
-            padding: EdgeInsets.fromLTRB(24, 24, 24, _voiceMode ? 100 : 24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                // Decorative top bar
-                Container(
-                  width: 48,
-                  height: 3,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFe2b96f),
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-                const SizedBox(height: 20),
-                Text(
-                  kalaam.title,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(fontSize: 26, color: Colors.white, fontWeight: FontWeight.bold, height: 1.3),
-                ),
-                if (kalaam.poet != null && kalaam.poet!.isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  Text(
-                    '— ${kalaam.poet}',
-                    style: const TextStyle(color: Color(0xFFe2b96f), fontSize: 15, fontStyle: FontStyle.italic),
-                  ),
-                ],
-                const SizedBox(height: 10),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    CircleAvatar(
-                      radius: 12,
-                      backgroundColor: const Color(0xFFe2b96f),
-                      backgroundImage: kalaam.author.avatar != null ? NetworkImage(kalaam.author.avatar!) : null,
-                      child: kalaam.author.avatar == null
-                          ? Text(
-                              kalaam.author.name.isNotEmpty ? kalaam.author.name[0].toUpperCase() : '?',
-                              style: const TextStyle(fontSize: 10, color: Colors.black, fontWeight: FontWeight.bold),
-                            )
-                          : null,
-                    ),
-                    const SizedBox(width: 8),
-                    Text(kalaam.author.name, style: const TextStyle(color: Colors.white54, fontSize: 13)),
-                    const SizedBox(width: 16),
-                    Text(_formatDate(kalaam.createdAt), style: const TextStyle(color: Colors.white38, fontSize: 12)),
-                  ],
-                ),
-                if (kalaam.tags.isNotEmpty) ...[
-                  const SizedBox(height: 12),
-                  Wrap(
-                    spacing: 6,
-                    runSpacing: 6,
-                    alignment: WrapAlignment.center,
-                    children: kalaam.tags.map((tag) => Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFe2b96f).withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(14),
-                        border: Border.all(color: const Color(0xFFe2b96f).withValues(alpha: 0.3)),
-                      ),
-                      child: Text(tag, style: const TextStyle(color: Color(0xFFe2b96f), fontSize: 11)),
-                    )).toList(),
-                  ),
-                ],
-                const Divider(color: Colors.white10, height: 48),
-                ..._buildLineWidgets(),
-              ],
-            ),
-          ),
-
-          // Voice indicator (when voice mode is on)
-          if (_voiceMode)
-            Positioned(
-              bottom: 0,
-              left: 0,
-              right: 0,
-              child: Container(
-                padding: const EdgeInsets.fromLTRB(24, 24, 24, 32),
-                decoration: const BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.bottomCenter,
-                    end: Alignment.topCenter,
-                    colors: [Color(0xEE0a0a14), Colors.transparent],
-                  ),
-                ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      _isListening ? Icons.mic : Icons.mic_off,
-                      color: _isListening ? const Color(0xFFe2b96f) : Colors.white38,
-                      size: 16,
-                    ),
-                    const SizedBox(width: 8),
-                    SizedBox(
-                      width: 100,
-                      height: 4,
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(2),
-                        child: ValueListenableBuilder<double>(
-                          valueListenable: _soundLevel,
-                          builder: (_, level, _) => LinearProgressIndicator(
-                            value: ((level + 50) / 50).clamp(0.0, 1.0),
-                            backgroundColor: Colors.white12,
-                            color: const Color(0xFFe2b96f),
+                  SafeArea(
+                    child: Column(
+                      children: [
+                        SizedBox(height: heroHeight - topInset + 16),
+                        Expanded(
+                          child: SingleChildScrollView(
+                            padding: const EdgeInsets.fromLTRB(20, 8, 20, 96),
+                            physics: const BouncingScrollPhysics(),
+                            child: Column(
+                              children: [
+                                _StaggeredFade(
+                                  progress: _stagger(t, 0.15, 0.55),
+                                  child: _TitleBlock(
+                                    kalaam: liveKalaam,
+                                    isDark: isDark,
+                                  ),
+                                ),
+                                const SizedBox(height: 18),
+                                _StaggeredFade(
+                                  progress: _stagger(t, 0.30, 0.70),
+                                  child: _StatsRow(
+                                    isDark: isDark,
+                                    likes: liveKalaam.likesCount,
+                                    // Per-kalaam save aggregation is not yet
+                                    // computed server-side; placeholder until
+                                    // the next backend pass.
+                                    saves: 0,
+                                    reads: liveKalaam.reads,
+                                    liked: liveKalaam.likedByMe,
+                                    onLikeTap: () => context
+                                        .read<KalaamProvider>()
+                                        .toggleLike(liveKalaam.id),
+                                    animateIn: t > 0.30,
+                                  ),
+                                ),
+                                const SizedBox(height: 18),
+                                _StaggeredFade(
+                                  progress: _stagger(t, 0.45, 0.85),
+                                  child: _CtaRow(
+                                    isDark: isDark,
+                                    onRead: _openReadSheet,
+                                    onFollowVoice: () =>
+                                        _openPractice(mode: 'follow'),
+                                  ),
+                                ),
+                                const SizedBox(height: 10),
+                                _StaggeredFade(
+                                  progress: _stagger(t, 0.50, 0.90),
+                                  child: Text(
+                                    'You started reading this one',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: isDark
+                                          ? Colors.white54
+                                          : _kInkMuted,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
+                      ],
+                    ),
+                  ),
+                  // Bottom action pills (Back + Visibility).
+                  Positioned(
+                    left: 16,
+                    right: 16,
+                    bottom: 16 + MediaQuery.of(context).padding.bottom,
+                    child: _StaggeredFade(
+                      progress: _stagger(t, 0.60, 1.00),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          _BottomPill(
+                            icon: Icons.arrow_back_rounded,
+                            label: 'Back',
+                            isDark: isDark,
+                            onTap: () => Navigator.pop(context),
+                          ),
+                          _BottomPill(
+                            icon: liveKalaam.isPublic
+                                ? Icons.public
+                                : Icons.lock_outline,
+                            label: liveKalaam.isPublic ? 'Public' : 'Private',
+                            isDark: isDark,
+                            onTap: isOwner ? _toggleVisibility : null,
+                          ),
+                        ],
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    const Text('Voice active',
-                        style: TextStyle(color: Colors.white54, fontSize: 11)),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
-        ],
+          );
+        },
       ),
     );
   }
 
-  List<Widget> _buildLineWidgets() {
-    final widgets = <Widget>[];
-    for (int i = 0; i < _lines.length; i++) {
-      widgets.add(_KalaamLineView(
-        lineKey: _lineKeys[i],
-        index: i,
-        line: _lines[i],
-        wordCount: _lineWordCounts[i],
-        voiceMode: _voiceMode,
-        currentLine: _currentLine,
-        currentWord: _currentWord,
-        onDoubleTap: _voiceAvailable ? () => _jumpToLine(i) : null,
-      ));
-      if (_lines[i].isLastInStanza && i < _lines.length - 1) {
-        widgets.add(_StanzaDivider());
-      }
-    }
-    widgets.add(const SizedBox(height: 16));
-    return widgets;
+  /// Maps a global progress [t] (0..1) onto a sub-interval [start..end] with
+  /// easeOut. Used to stagger child entry animations within a single
+  /// controller so we don't pay for N controllers.
+  double _stagger(double t, double start, double end) {
+    if (t <= start) return 0.0;
+    if (t >= end) return 1.0;
+    return Curves.easeOut.transform((t - start) / (end - start));
   }
-
-  String _formatDate(DateTime d) => '${d.day}/${d.month}/${d.year}';
 }
 
-class _KalaamLineView extends StatelessWidget {
-  final GlobalKey lineKey;
-  final int index;
-  final _DetailLine line;
-  final int wordCount;
-  final bool voiceMode;
-  final ValueListenable<int> currentLine;
-  final ValueListenable<int> currentWord;
-  final VoidCallback? onDoubleTap;
+// ─── Hero tombstone ─────────────────────────────────────────────────────────
 
-  const _KalaamLineView({
-    required this.lineKey,
-    required this.index,
-    required this.line,
-    required this.wordCount,
-    required this.voiceMode,
-    required this.currentLine,
-    required this.currentWord,
-    required this.onDoubleTap,
+class _Hero extends StatelessWidget {
+  final double height;
+  final double topInset;
+  final String glyph;
+  final double progress; // 0..1 for glyph scale-in
+
+  const _Hero({
+    required this.height,
+    required this.topInset,
+    required this.glyph,
+    required this.progress,
   });
-
-  // Shared paint instance — used by every active-word background, avoiding
-  // a new Paint allocation on each word-highlight rebuild.
-  static final Paint _highlightPaint = Paint()
-    ..color = const Color(0xFFe2b96f);
-  static final RegExp _wsSplit = RegExp(r'\s+');
-
-  static const _activeWordStyle = TextStyle(
-    color: Color(0xFFe2b96f),
-    fontSize: 17,
-    fontWeight: FontWeight.w500,
-    height: 1.8,
-  );
 
   @override
   Widget build(BuildContext context) {
-    return RepaintBoundary(
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onDoubleTap: onDoubleTap,
-        child: Container(
-          key: lineKey,
-          padding: const EdgeInsets.symmetric(vertical: 5),
-          child: ValueListenableBuilder<int>(
-            valueListenable: currentLine,
-            builder: (_, curLine, _) {
-              final isCurrent = voiceMode && curLine == index;
-              if (isCurrent && wordCount > 0) {
-                return ValueListenableBuilder<int>(
-                  valueListenable: currentWord,
-                  builder: (_, curWord, _) => _buildActive(curWord),
-                );
-              }
-              final dimmed = voiceMode && curLine >= 0 && !isCurrent;
-              return _buildInactive(dimmed);
-            },
+    final size = MediaQuery.of(context).size;
+    // The hero is a vertical column ~70% of the viewport width, centered, with
+    // big bottom-rounded corners — the inverted-U "tombstone" shape from Figma.
+    final heroWidth = size.width * 0.72;
+    final scale = 0.92 + 0.08 * progress;
+
+    return Positioned(
+      top: 0,
+      left: (size.width - heroWidth) / 2,
+      width: heroWidth,
+      height: height,
+      child: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [_kTealDarkGradTop, _kTeal],
+          ),
+          borderRadius: BorderRadius.only(
+            bottomLeft: Radius.circular(80),
+            bottomRight: Radius.circular(80),
+          ),
+        ),
+        alignment: Alignment.center,
+        child: Padding(
+          padding: EdgeInsets.only(top: topInset * 0.4),
+          child: Opacity(
+            opacity: progress,
+            child: Transform.scale(
+              scale: scale,
+              child: Text(
+                glyph,
+                textDirection: TextDirection.rtl,
+                style: const TextStyle(
+                  fontSize: 120,
+                  height: 1.0,
+                  color: Colors.white,
+                  fontWeight: FontWeight.w500,
+                  letterSpacing: -2.0,
+                ),
+              ),
+            ),
           ),
         ),
       ),
     );
   }
-
-  Widget _buildActive(int curWord) {
-    final words = line.text.trim().split(_wsSplit);
-    return Center(
-      child: RichText(
-        textAlign: TextAlign.center,
-        text: TextSpan(
-          children: List<TextSpan>.generate(words.length, (wi) {
-            final word = words[wi];
-            final isCurrentWord = wi == curWord;
-            final text = wi < words.length - 1 ? '$word ' : word;
-            if (!isCurrentWord) {
-              return TextSpan(text: text, style: _activeWordStyle);
-            }
-            return TextSpan(
-              text: text,
-              style: TextStyle(
-                color: Colors.black,
-                fontSize: 17,
-                fontWeight: FontWeight.w500,
-                height: 1.8,
-                background: _highlightPaint,
-              ),
-            );
-          }),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildInactive(bool dimmed) {
-    return Text(
-      line.text,
-      textAlign: TextAlign.center,
-      style: TextStyle(
-        color: dimmed ? Colors.white38 : const Color(0xDEFFFFFF),
-        fontSize: 17,
-        height: 1.8,
-        fontWeight: FontWeight.w300,
-      ),
-    );
-  }
 }
 
-class _DetailLine {
-  final int stanzaIndex;
-  final int lineIndex;
-  final String text;
-  final bool isLastInStanza;
-  _DetailLine({
-    required this.stanzaIndex,
-    required this.lineIndex,
-    required this.text,
-    required this.isLastInStanza,
-  });
-}
+// ─── Title + author block ───────────────────────────────────────────────────
 
-class _StanzaDivider extends StatelessWidget {
+class _TitleBlock extends StatelessWidget {
+  final KalaamModel kalaam;
+  final bool isDark;
+
+  const _TitleBlock({required this.kalaam, required this.isDark});
+
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 20),
+    final hasTag = kalaam.tags.isNotEmpty;
+    final titleColor = isDark ? Colors.white : Colors.black;
+    final dateText = _formatDate(kalaam.createdAt);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        if (hasTag)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            decoration: BoxDecoration(
+              color: isDark ? _kChipDarkBg : _kChipLightBg,
+              borderRadius: BorderRadius.circular(40),
+            ),
+            child: Text(
+              kalaam.tags.first,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+                color: isDark ? _kChipDarkFg : _kChipLightFg,
+              ),
+            ),
+          ),
+        if (hasTag) const SizedBox(height: 14),
+        Text(
+          kalaam.title,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: 28,
+            height: 1.2,
+            fontWeight: FontWeight.w600,
+            color: titleColor,
+            letterSpacing: -0.6,
+          ),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircleAvatar(
+              radius: 12,
+              backgroundColor:
+                  isDark ? Colors.white12 : _kTeal.withValues(alpha: 0.15),
+              backgroundImage: kalaam.author.avatar != null
+                  ? NetworkImage(kalaam.author.avatar!)
+                  : null,
+              child: kalaam.author.avatar == null
+                  ? Text(
+                      kalaam.author.name.isNotEmpty
+                          ? kalaam.author.name[0].toUpperCase()
+                          : '?',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: isDark ? Colors.white : _kTeal,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    )
+                  : null,
+            ),
+            const SizedBox(width: 8),
+            Text(
+              kalaam.author.name.isEmpty ? 'Unknown' : kalaam.author.name,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+                color: isDark ? Colors.white : _kInkPrimary,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Container(
+              width: 1,
+              height: 12,
+              color: isDark ? Colors.white24 : _kInkMuted.withValues(alpha: 0.4),
+            ),
+            const SizedBox(width: 10),
+            Text(
+              dateText,
+              style: TextStyle(
+                fontSize: 12,
+                color: isDark ? Colors.white54 : _kInkMuted,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  static String _formatDate(DateTime d) {
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(d.day)}/${two(d.month)}/${d.year}';
+  }
+}
+
+// ─── Stats row (likes / saves / reads) ──────────────────────────────────────
+
+class _StatsRow extends StatelessWidget {
+  final bool isDark;
+  final int likes;
+  final int saves;
+  final int reads;
+  final bool liked;
+  final bool animateIn;
+  final VoidCallback onLikeTap;
+
+  const _StatsRow({
+    required this.isDark,
+    required this.likes,
+    required this.saves,
+    required this.reads,
+    required this.liked,
+    required this.animateIn,
+    required this.onLikeTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
+      decoration: BoxDecoration(
+        color: isDark ? _kSurfaceDark : _kSurfaceLight,
+        borderRadius: BorderRadius.circular(18),
+      ),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Container(width: 40, height: 1, color: Colors.white12),
-          const SizedBox(width: 10),
-          const Text('✦', style: TextStyle(color: Color(0xFFe2b96f), fontSize: 12)),
-          const SizedBox(width: 10),
-          Container(width: 40, height: 1, color: Colors.white12),
+          Expanded(
+            child: _StatCell(
+              icon: liked ? Icons.favorite : Icons.favorite_border,
+              iconColor: liked ? Colors.redAccent : null,
+              value: likes,
+              label: 'Likes',
+              isDark: isDark,
+              animateIn: animateIn,
+              onTap: onLikeTap,
+            ),
+          ),
+          Expanded(
+            child: _StatCell(
+              icon: Icons.bookmark_outline,
+              value: saves,
+              label: 'Saves',
+              isDark: isDark,
+              animateIn: animateIn,
+            ),
+          ),
+          Expanded(
+            child: _StatCell(
+              icon: Icons.menu_book_rounded,
+              value: reads,
+              label: 'Read',
+              isDark: isDark,
+              animateIn: animateIn,
+            ),
+          ),
         ],
       ),
     );
   }
 }
 
-class _FollowVoiceButton extends StatelessWidget {
-  final bool voiceMode;
-  final bool voiceAvailable;
+class _StatCell extends StatelessWidget {
+  final IconData icon;
+  final int value;
+  final String label;
+  final bool isDark;
+  final bool animateIn;
+  final Color? iconColor;
   final VoidCallback? onTap;
 
-  const _FollowVoiceButton({
-    required this.voiceMode,
-    required this.voiceAvailable,
+  const _StatCell({
+    required this.icon,
+    required this.value,
+    required this.label,
+    required this.isDark,
+    required this.animateIn,
+    this.iconColor,
+    this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = isDark ? Colors.white : Colors.black;
+    final muted = isDark ? Colors.white70 : _kInkPrimary;
+    final cell = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Swap the icon with a scale+fade so a like tap feels punchy.
+        AnimatedSwitcher(
+          duration: const Duration(milliseconds: 220),
+          transitionBuilder: (child, anim) => ScaleTransition(
+            scale: Tween<double>(begin: 0.7, end: 1.0).animate(anim),
+            child: FadeTransition(opacity: anim, child: child),
+          ),
+          child: Icon(
+            icon,
+            key: ValueKey(icon),
+            size: 22,
+            color: iconColor ?? fg,
+          ),
+        ),
+        const SizedBox(height: 6),
+        TweenAnimationBuilder<double>(
+          // animateIn flips false→true after the staggered entry hits this
+          // row, which restarts the tween from 0 to the target count.
+          tween: Tween<double>(begin: 0, end: animateIn ? value.toDouble() : 0),
+          duration: const Duration(milliseconds: 700),
+          curve: Curves.easeOut,
+          builder: (_, v, _) {
+            final shown = v.round();
+            return Text(
+              '$shown $label',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+                color: muted,
+              ),
+            );
+          },
+        ),
+      ],
+    );
+    if (onTap == null) return cell;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: cell,
+      ),
+    );
+  }
+}
+
+// ─── CTA row (Read / Follow Voice) ──────────────────────────────────────────
+
+class _CtaRow extends StatelessWidget {
+  final bool isDark;
+  final VoidCallback onRead;
+  final VoidCallback onFollowVoice;
+
+  const _CtaRow({
+    required this.isDark,
+    required this.onRead,
+    required this.onFollowVoice,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: _PressablePill(
+            background: isDark ? _kTealOnDark : _kTeal,
+            foreground: Colors.white,
+            icon: Icons.menu_book_rounded,
+            label: 'Read This Kalaam',
+            onTap: onRead,
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: _PressablePill(
+            background: isDark ? const Color(0xFF1F1F1F) : Colors.black,
+            foreground: Colors.white,
+            icon: Icons.graphic_eq_rounded,
+            label: 'Follow My Voice',
+            onTap: onFollowVoice,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Pill that scales down on press for tactile feedback. Wraps a [GestureDetector]
+/// + [AnimatedScale] instead of an InkWell so the visual stays flat (no
+/// Material ripple on top of the brand colours).
+class _PressablePill extends StatefulWidget {
+  final Color background;
+  final Color foreground;
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  const _PressablePill({
+    required this.background,
+    required this.foreground,
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  @override
+  State<_PressablePill> createState() => _PressablePillState();
+}
+
+class _PressablePillState extends State<_PressablePill> {
+  bool _pressed = false;
+
+  void _setPressed(bool v) {
+    if (_pressed == v) return;
+    setState(() => _pressed = v);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (_) => _setPressed(true),
+      onTapUp: (_) => _setPressed(false),
+      onTapCancel: () => _setPressed(false),
+      onTap: widget.onTap,
+      child: AnimatedScale(
+        scale: _pressed ? 0.97 : 1.0,
+        duration: const Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+        child: Container(
+          height: 48,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: widget.background,
+            borderRadius: BorderRadius.circular(28),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(widget.icon, size: 16, color: widget.foreground),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  widget.label,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: widget.foreground,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Bottom action pills (back + visibility) ────────────────────────────────
+
+class _BottomPill extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool isDark;
+  final VoidCallback? onTap;
+
+  const _BottomPill({
+    required this.icon,
+    required this.label,
+    required this.isDark,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    final activeColor = const Color(0xFFe2b96f);
-    final fg = voiceMode
-        ? activeColor
-        : (voiceAvailable ? Colors.white70 : Colors.white24);
+    final bg = isDark ? _kSurfaceDark : _kSurfaceLight;
+    final fg = isDark ? Colors.white : _kInkPrimary;
 
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        decoration: BoxDecoration(
-          color: voiceMode ? activeColor.withValues(alpha: 0.15) : Colors.transparent,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: voiceMode
-                ? activeColor.withValues(alpha: 0.5)
-                : (voiceAvailable ? Colors.white24 : Colors.white12),
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              voiceMode ? Icons.mic : Icons.mic_none,
-              size: 14,
+    final pill = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(28),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 16, color: fg),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
               color: fg,
             ),
-            const SizedBox(width: 6),
-            Text(
-              voiceMode
-                  ? 'Voice on'
-                  : (voiceAvailable ? 'Follow my voice' : 'Mic unavailable'),
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: fg,
+          ),
+        ],
+      ),
+    );
+
+    if (onTap == null) return pill;
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: pill,
+    );
+  }
+}
+
+// ─── Stagger fade helper ────────────────────────────────────────────────────
+
+/// Applies a [progress] (0..1) as combined fade + slight upward slide so each
+/// section can ride a slice of the global entry controller.
+class _StaggeredFade extends StatelessWidget {
+  final double progress;
+  final Widget child;
+
+  const _StaggeredFade({required this.progress, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return Opacity(
+      opacity: progress,
+      child: Transform.translate(
+        offset: Offset(0, (1 - progress) * 10),
+        child: child,
+      ),
+    );
+  }
+}
+
+// ─── Category glyph helper (mirrors home_screen.dart) ───────────────────────
+
+class _CategoryGlyph {
+  final String glyph;
+  const _CategoryGlyph(this.glyph);
+
+  static _CategoryGlyph from(String category) {
+    switch (category) {
+      case 'nauha':
+        return const _CategoryGlyph('نوحہ');
+      case 'marsiya':
+        return const _CategoryGlyph('مرثیہ');
+      case 'qasida':
+        return const _CategoryGlyph('قصیدہ');
+      case 'qata':
+        return const _CategoryGlyph('قطع');
+      default:
+        return const _CategoryGlyph('بیاض');
+    }
+  }
+}
+
+// ─── Read sheet (inline reader) ─────────────────────────────────────────────
+// Replaces the previous navigation to PracticeModeScreen for the Read CTA.
+// Opens as a draggable modal sheet over the detail screen, with the kalaam's
+// stanzas separated by the brand's orange-diamond divider.
+
+class _ReadSheet extends StatelessWidget {
+  final KalaamModel kalaam;
+  final bool isDark;
+  const _ReadSheet({required this.kalaam, required this.isDark});
+
+  @override
+  Widget build(BuildContext context) {
+    final sheetBg = isDark ? const Color(0xFF111111) : Colors.white;
+    final titleColor = isDark ? Colors.white : Colors.black;
+    final stanzaColor = isDark ? const Color(0xFFE8E8E8) : const Color(0xFF1F1F1F);
+    final dividerLine = isDark
+        ? Colors.white.withValues(alpha: 0.10)
+        : Colors.black.withValues(alpha: 0.08);
+    final handleColor =
+        isDark ? const Color(0xFF2A2A2A) : const Color(0xFFE2E2E2);
+    final tagBg = isDark ? const Color(0xFF2A1A0C) : const Color(0xFFFDA944);
+    final tagFg = isDark ? const Color(0xFFFDA944) : Colors.white;
+    final firstTag = kalaam.tags.isNotEmpty ? kalaam.tags.first : null;
+
+    return DraggableScrollableSheet(
+      initialChildSize: 0.78,
+      minChildSize: 0.45,
+      maxChildSize: 0.95,
+      expand: false,
+      builder: (ctx, scrollController) {
+        return Container(
+          decoration: BoxDecoration(
+            color: sheetBg,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.18),
+                blurRadius: 28,
+                offset: const Offset(0, -4),
               ),
+            ],
+          ),
+          child: Column(
+            children: [
+              const SizedBox(height: 10),
+              Container(
+                width: 38,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: handleColor,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                'Swipe down to close',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: isDark ? Colors.white38 : _kInkMuted,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              const SizedBox(height: 14),
+              if (firstTag != null) ...[
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 14, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: tagBg,
+                    borderRadius: BorderRadius.circular(40),
+                  ),
+                  child: Text(
+                    firstTag,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: tagFg,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: -0.2,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: Text(
+                  kalaam.title,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 24,
+                    color: titleColor,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: -0.6,
+                    height: 1.2,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 6),
+              Expanded(
+                child: kalaam.content.isEmpty
+                    ? Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(24),
+                          child: Text(
+                            'This kalaam has no content yet.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: isDark
+                                  ? Colors.white54
+                                  : _kInkMuted,
+                            ),
+                          ),
+                        ),
+                      )
+                    : ListView.separated(
+                        controller: scrollController,
+                        padding: const EdgeInsets.fromLTRB(24, 16, 24, 40),
+                        itemCount: kalaam.content.length,
+                        separatorBuilder: (_, _) => _DiamondDivider(
+                          lineColor: dividerLine,
+                        ),
+                        itemBuilder: (ctx, i) {
+                          final stanza = kalaam.content[i];
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            child: Text(
+                              stanza.lines.join('\n'),
+                              textAlign: TextAlign.center,
+                              textDirection: _detectDirection(stanza.lines),
+                              style: TextStyle(
+                                fontSize: 16,
+                                height: 1.55,
+                                color: stanzaColor,
+                                fontWeight: FontWeight.w500,
+                                letterSpacing: -0.2,
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  // Pick RTL when the first non-whitespace character is in the Arabic block,
+  // so Urdu/Arabic stanzas render correctly while Roman-Urdu stays LTR.
+  static TextDirection _detectDirection(List<String> lines) {
+    for (final line in lines) {
+      for (final code in line.runes) {
+        if (code == 0x20 || code == 0x09) continue;
+        // Arabic + Arabic Supplement + Arabic Extended-A blocks.
+        if ((code >= 0x0600 && code <= 0x06FF) ||
+            (code >= 0x0750 && code <= 0x077F) ||
+            (code >= 0x08A0 && code <= 0x08FF) ||
+            (code >= 0xFB50 && code <= 0xFDFF) ||
+            (code >= 0xFE70 && code <= 0xFEFF)) {
+          return TextDirection.rtl;
+        }
+        return TextDirection.ltr;
+      }
+    }
+    return TextDirection.ltr;
+  }
+}
+
+class _DiamondDivider extends StatelessWidget {
+  final Color lineColor;
+  const _DiamondDivider({required this.lineColor});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        children: [
+          Expanded(child: Container(height: 1, color: lineColor)),
+          const SizedBox(width: 10),
+          Transform.rotate(
+            angle: 0.7853981633974483, // pi / 4
+            child: Container(
+              width: 8,
+              height: 8,
+              decoration: const BoxDecoration(color: Color(0xFFFDA944)),
             ),
-          ],
-        ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(child: Container(height: 1, color: lineColor)),
+        ],
       ),
     );
   }
