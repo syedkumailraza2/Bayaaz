@@ -2,6 +2,8 @@ const jwt = require('jsonwebtoken');
 const Session = require('../model/Session');
 const Suggestion = require('../model/Suggestion');
 const sessionsRoute = require('../routes/sessions');
+const { splitKalaamHemistichs } = require('../services/hemistichSplit');
+const voskBridge = require('../services/voskBridge');
 
 const QUEUE_ITEM_POPULATE = sessionsRoute.QUEUE_ITEM_POPULATE;
 const advanceSession = sessionsRoute.advanceSession;
@@ -33,7 +35,9 @@ module.exports = function attachSessionHandlers(io) {
           .populate('queue', 'title category author')
           .populate(QUEUE_ITEM_POPULATE);
         if (session) {
-          socket.emit('session:joined', { session });
+          const out = session.toObject();
+          if (out.currentKalamId) out.currentKalamId = splitKalaamHemistichs(out.currentKalamId);
+          socket.emit('session:joined', { session: out });
         }
       } catch (err) {
         socket.emit('session:error', { message: err.message });
@@ -43,6 +47,21 @@ module.exports = function attachSessionHandlers(io) {
     // --- session:leave ---
     socket.on('session:leave', ({ sessionId }) => {
       socket.leave(`session:${sessionId}`);
+    });
+
+    // --- group:join / group:leave ---
+    // Lets the group detail screen receive group-level events
+    // (session started/ended) without first opening the teleprompter.
+    socket.on('group:join', ({ groupId }) => {
+      if (typeof groupId === 'string' && groupId.length > 0) {
+        socket.join(`group:${groupId}`);
+      }
+    });
+
+    socket.on('group:leave', ({ groupId }) => {
+      if (typeof groupId === 'string' && groupId.length > 0) {
+        socket.leave(`group:${groupId}`);
+      }
     });
 
     // --- host:setKalam ---
@@ -243,7 +262,33 @@ module.exports = function attachSessionHandlers(io) {
       }
     });
 
+    // --- voice:start / voice:frame / voice:end ---
+    // Host opens a streaming PCM channel to the Vosk bridge. Frames are
+    // raw 16-bit little-endian mono PCM; the bridge runs the fuzzy matcher
+    // on Vosk partials/finals and broadcasts `session:stanzaChanged`.
+    socket.on('voice:start', async ({ sessionId }) => {
+      if (!currentUserId) return socket.emit('voice:error', { message: 'Not authenticated' });
+      if (!sessionId) return socket.emit('voice:error', { message: 'sessionId required' });
+      try {
+        await voskBridge.startBridge(socket, io, sessionId, currentUserId);
+      } catch (err) {
+        console.error('[voice:start] failed:', err.message);
+        socket.emit('voice:error', { message: err.message });
+      }
+    });
+
+    socket.on('voice:frame', (frame) => {
+      // socket.io delivers binary as Node Buffer; pass through unchanged.
+      if (!frame) return;
+      voskBridge.pushFrame(socket, frame);
+    });
+
+    socket.on('voice:end', () => {
+      voskBridge.stopBridge(socket);
+    });
+
     socket.on('disconnect', () => {
+      voskBridge.stopBridge(socket);
       // socket.io handles room cleanup on disconnect
     });
   });

@@ -21,6 +21,7 @@ import 'screens/group_session_screen.dart';
 import 'screens/group_session_teleprompter.dart';
 import 'services/deep_link_service.dart';
 import 'services/offline_sync_service.dart';
+import 'services/warmup_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -122,6 +123,12 @@ class _SplashRouterState extends State<_SplashRouter>
   late final Animation<double> _titleFade;
   late final Animation<double> _subtitleFade;
 
+  // Becomes true once the warmup ping has been slow long enough to warrant
+  // showing the user a "Waking up server…" hint. Render cold starts take
+  // 30-50s; we don't want to leave the user staring at a frozen splash.
+  bool _showColdStartHint = false;
+  Timer? _coldStartHintTimer;
+
   @override
   void initState() {
     super.initState();
@@ -147,6 +154,21 @@ class _SplashRouterState extends State<_SplashRouter>
     // Keep the splash up for the full intro sequence even on instant boots.
     final minSplash = Future<void>.delayed(const Duration(milliseconds: 2400));
 
+    // Kick off the server warmup ping in parallel with local boot work.
+    // Render's free tier cold-starts in 30-50s; the rest of the bootstrap
+    // (Isar open, cache hydrate) is local and fast, so we'd otherwise sit on
+    // the home screen and have the first real request fail with a timeout.
+    final warmup = WarmupService.instance.warmup(
+      maxTotalDuration: const Duration(seconds: 60),
+    );
+    // If the server doesn't come back within 2.5s, show the user a "waking up"
+    // hint so the long splash doesn't look like a hang.
+    _coldStartHintTimer = Timer(const Duration(milliseconds: 2500), () {
+      if (mounted && !WarmupService.instance.isWarm) {
+        setState(() => _showColdStartHint = true);
+      }
+    });
+
     // 1. Open Isar before anything reads/writes the cache.
     try {
       await IsarService.instance.open();
@@ -161,6 +183,17 @@ class _SplashRouterState extends State<_SplashRouter>
     if (IsarService.instance.isOpen) {
       await kalaamProvider.hydrateFeedFromCache();
       await kalaamProvider.hydrateMyBayaazFromCache();
+    }
+
+    if (!mounted) return;
+
+    // 2b. Wait for the server to be warm before doing any network work.
+    // tryAutoLogin and the post-login syncs all need a live backend; firing
+    // them at a cold dyno fails fast and leaves the app in a bad state.
+    await warmup;
+    _coldStartHintTimer?.cancel();
+    if (mounted && _showColdStartHint) {
+      setState(() => _showColdStartHint = false);
     }
 
     if (!mounted) return;
@@ -209,6 +242,7 @@ class _SplashRouterState extends State<_SplashRouter>
   void dispose() {
     _anim.dispose();
     _connectivitySub?.cancel();
+    _coldStartHintTimer?.cancel();
     super.dispose();
   }
 
@@ -264,9 +298,43 @@ class _SplashRouterState extends State<_SplashRouter>
                       ],
                     ),
                   ),
-                ],
-              );
-            },
+                ),
+                const SizedBox(height: 24),
+                _AnimatedHairline(animation: _bottomLine, color: gold),
+                const SizedBox(height: 28),
+                AnimatedOpacity(
+                  duration: const Duration(milliseconds: 300),
+                  opacity: _showColdStartHint ? 1.0 : 0.0,
+                  child: Directionality(
+                    textDirection: TextDirection.ltr,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          width: 12,
+                          height: 12,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 1.5,
+                            valueColor:
+                                AlwaysStoppedAnimation<Color>(gold.withValues(alpha: 0.6)),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Text(
+                          'Waking up server…',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: gold.withValues(alpha: 0.65),
+                            letterSpacing: 1.4,
+                            fontWeight: FontWeight.w300,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),

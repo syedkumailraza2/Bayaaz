@@ -15,7 +15,7 @@ class AppConfig {
   static const String _envBaseUrl = String.fromEnvironment(
     'BASE_URL',
     defaultValue:
-        'https://holland-madonna-posters-became.trycloudflare.com',
+        'https://recovery-packed-mother-pty.trycloudflare.com',
   );
 
   static String? _override;

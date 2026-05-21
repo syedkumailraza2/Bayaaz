@@ -8,6 +8,7 @@ import '../models/session_model.dart';
 import '../providers/auth_provider.dart';
 import '../providers/group_provider.dart';
 import '../services/api_service.dart';
+import '../services/socket_service.dart';
 import 'kalaam_picker_sheet.dart';
 
 class GroupDetailScreen extends StatefulWidget {
@@ -26,6 +27,7 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
   bool _loadingSession = false;
   bool _loadingGroup = false;
   List<QueueSnapshotSummary> _snapshots = const [];
+  String? _joinedGroupId; // group room we're currently subscribed to
 
   @override
   void didChangeDependencies() {
@@ -33,15 +35,84 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
     if (_group != null || _pendingGroupId != null) return;
 
     final arg = ModalRoute.of(context)?.settings.arguments;
+    String? groupId;
     if (arg is GroupModel) {
       _group = arg;
+      groupId = arg.id;
       _loadFreshData(arg.id);
     } else if (arg is Map && arg['groupId'] is String) {
       // Came from the deep-link redeem flow. We only have the id; fetch the rest.
       _pendingGroupId = arg['groupId'] as String;
       _pendingGroupName = arg['groupName'] is String ? arg['groupName'] as String : null;
+      groupId = _pendingGroupId;
       _loadFreshData(_pendingGroupId!);
     }
+    if (groupId != null) _attachGroupSocket(groupId);
+  }
+
+  /// Subscribe to group-level realtime events so the Start/Join Session button
+  /// flips the moment a host starts (or ends) a session — no back-and-return
+  /// dance required. Pin the room ID immediately so reconnects from the
+  /// SocketService lifecycle re-emit the join, and use a guard flag so
+  /// rapid didChangeDependencies cycles don't double-register listeners.
+  bool _attachingSocket = false;
+  Future<void> _attachGroupSocket(String groupId) async {
+    if (_joinedGroupId == groupId || _attachingSocket) return;
+    _attachingSocket = true;
+    final socket = SocketService();
+    try {
+      await socket.connect();
+    } catch (e) {
+      debugPrint('[group-detail] socket connect failed: $e');
+      _attachingSocket = false;
+      return;
+    }
+    if (!mounted) {
+      _attachingSocket = false;
+      return;
+    }
+    // Register listeners FIRST so the server's emit-on-join echo isn't dropped.
+    socket.on('group:sessionStarted', _onGroupSessionStarted);
+    socket.on('group:sessionEnded', _onGroupSessionEnded);
+    socket.joinGroup(groupId);
+    _joinedGroupId = groupId;
+    _attachingSocket = false;
+    debugPrint('[group-detail] joined group:$groupId  connected=${socket.isConnected}');
+  }
+
+  void _onGroupSessionStarted(dynamic data) {
+    debugPrint('[group-detail] group:sessionStarted received: $data');
+    if (!mounted || data is! Map) return;
+    if (data['groupId']?.toString() != (_group?.id ?? _pendingGroupId)) return;
+    final raw = data['session'];
+    if (raw is! Map) return;
+    try {
+      final session =
+          SessionModel.fromJson(Map<String, dynamic>.from(raw));
+      if (!session.isActive) return;
+      setState(() => _activeSession = session);
+    } catch (e) {
+      debugPrint('[group-detail] bad sessionStarted payload: $e');
+    }
+  }
+
+  void _onGroupSessionEnded(dynamic data) {
+    debugPrint('[group-detail] group:sessionEnded received: $data');
+    if (!mounted || data is! Map) return;
+    if (data['groupId']?.toString() != (_group?.id ?? _pendingGroupId)) return;
+    setState(() => _activeSession = null);
+  }
+
+  @override
+  void dispose() {
+    final gid = _joinedGroupId;
+    if (gid != null) {
+      final socket = SocketService();
+      socket.leaveGroup(gid);
+      socket.off('group:sessionStarted');
+      socket.off('group:sessionEnded');
+    }
+    super.dispose();
   }
 
   Future<void> _loadFreshData(String groupId) async {

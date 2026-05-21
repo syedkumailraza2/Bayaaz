@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../config/app_config.dart';
 import '../services/socket_service.dart';
+import '../services/warmup_service.dart';
 
 /// Opens a dialog letting the user override the server base URL at runtime.
 /// Returns `true` if the URL was changed (caller can hot-restart the app).
@@ -67,6 +68,7 @@ Future<bool> showServerUrlDialog(BuildContext context) async {
               TextButton(
                 onPressed: () async {
                   await AppConfig.setBaseUrl(null);
+                  WarmupService.instance.invalidate();
                   SocketService().disconnect();
                   if (ctx.mounted) Navigator.pop(ctx, true);
                 },
@@ -89,6 +91,7 @@ Future<bool> showServerUrlDialog(BuildContext context) async {
                     return;
                   }
                   await AppConfig.setBaseUrl(raw);
+                  WarmupService.instance.invalidate();
                   SocketService().disconnect();
                   if (ctx.mounted) Navigator.pop(ctx, true);
                 },

@@ -11,4 +11,7 @@ env/
 *.flac
 *.ogg
 models/
+model
+vosk-model-*/
+.DS_Store
 .pytest_cache/

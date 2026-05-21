@@ -1,10 +1,7 @@
 import 'dart:async';
-import 'dart:io';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:record/record.dart';
 
@@ -19,9 +16,9 @@ import '../services/socket_service.dart';
 ///
 /// Host: single-tap any line to highlight + broadcast it (`host:setStanza`).
 /// Host can also enable Voice Follow (mic button in AppBar) — the recorder
-/// captures short chunks, uploads each to `/api/sessions/:id/voice-chunk`,
-/// the server transcribes via Whisper + fuzzy-matches against the kalaam,
-/// and broadcasts `session:stanzaChanged` to the whole room.
+/// streams raw 16-bit PCM over the socket to the Vosk bridge, which runs
+/// the fuzzy matcher on each partial/final transcript and broadcasts
+/// `session:stanzaChanged` to the whole room.
 /// "Done — Next" in the bottom bar pops the next kalaam off the sorted queue.
 /// Members: read-only. The current line follows whatever the host emits.
 class GroupSessionTeleprompter extends StatefulWidget {
@@ -45,23 +42,20 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
   bool _adoptScheduled = false; // dedupes postFrame _adoptKalam calls
 
   // ── Voice follow (host only) ────────────────────────────────────────────
-  // Records short chunks and uploads each to the server, which runs Whisper +
-  // fuzzy-matches the transcript to the current kalaam and broadcasts the
-  // matched line to the whole room.
+  // Streams raw 16-bit PCM over the socket to the Vosk bridge. Vosk emits
+  // partial+final transcripts in realtime; the server fuzzy-matches each
+  // against the current kalaam and broadcasts the matched line.
   AudioRecorder? _recorder;
   bool _voiceAvailable = false;
   bool _voiceMode = false;
-  bool _isListening = false;     // a chunk is being captured right now
-  bool _isUploading = false;     // a chunk is in flight
+  bool _isStreaming = false;     // mic is open + frames are flowing
   bool _voiceInitAttempted = false;
-  Completer<void>? _stopLoopCompleter;
-  final ValueNotifier<double> _soundLevel = ValueNotifier<double>(0.0);
+  StreamSubscription<Uint8List>? _pcmSub;
   StreamSubscription<Amplitude>? _ampSub;
-  int _lastEmittedFlat = -1;
+  final ValueNotifier<double> _soundLevel = ValueNotifier<double>(0.0);
 
-  // Chunk size: long enough for Whisper to lock onto a phrase, short enough
-  // that the highlight feels responsive. ~3s is the sweet spot for small int8.
-  static const _chunkDuration = Duration(milliseconds: 3000);
+  // PCM stream config — must match what the Vosk bridge / model expects.
+  static const _sampleRate = 16000;
 
   @override
   void didChangeDependencies() {
@@ -108,11 +102,13 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
 
   @override
   void dispose() {
-    // Stop and tear down the recorder.
-    if (_voiceMode || _isListening) {
+    // Stop streaming and tear down the recorder.
+    if (_voiceMode || _isStreaming) {
       _voiceMode = false;
+      SocketService().emitVoiceEnd();
       _recorder?.stop().catchError((_) => null);
     }
+    _pcmSub?.cancel();
     _ampSub?.cancel();
     _recorder?.dispose();
     if (_sessionId != null) {
@@ -126,6 +122,8 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
         'session:newSuggestion',
         'session:suggestionHandled',
         'session:ended',
+        'voice:ready',
+        'voice:error',
       ]) {
         SocketService().off(event);
       }
@@ -201,6 +199,12 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         _currentLine.value = flat;
+        // ValueListenableBuilder rebuilds the per-row text styling, but if
+        // anything in the tree is shielding the rebuild (RepaintBoundary +
+        // GlobalKey'd Container around the listenable) the highlight can
+        // visually stick. Calling setState forces the ListView itself to
+        // rebuild its visible rows so the gold/normal style applies reliably.
+        setState(() {});
         _scrollToCurrentLine();
       });
     }
@@ -258,125 +262,87 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
     }
     _lines = flat;
     _lineKeys = List.generate(flat.length, (_) => GlobalKey());
-    _lastEmittedFlat = -1;
     setState(() {});
   }
 
-  // ── Voice follow: chunk recorder loop ───────────────────────────────────
+  // ── Voice follow: PCM streaming over socket.io ─────────────────────────
 
   void _toggleVoiceMode() {
     if (!_voiceAvailable) return;
     setState(() => _voiceMode = !_voiceMode);
     if (_voiceMode) {
-      _runChunkLoop();
+      _startStreaming();
     } else {
-      _stopChunkLoop();
+      _stopStreaming();
     }
   }
 
-  Future<void> _runChunkLoop() async {
-    if (_recorder == null) return;
-    _stopLoopCompleter = Completer<void>();
-    _ampSub?.cancel();
-    _ampSub = _recorder!
-        .onAmplitudeChanged(const Duration(milliseconds: 200))
-        .listen((amp) {
-      // amp.current is dBFS (~-160 … 0). Map to a 0..1 bar.
-      final v = ((amp.current + 50) / 50).clamp(0.0, 1.0);
-      _soundLevel.value = v;
+  Future<void> _startStreaming() async {
+    final sid = _sessionId;
+    if (sid == null || _recorder == null) return;
+
+    final socket = SocketService();
+    // Hook up one-shot listeners for bridge readiness/errors.
+    socket.on('voice:ready', (_) {
+      debugPrint('[voice] bridge ready');
+    });
+    socket.on('voice:error', (data) {
+      debugPrint('[voice] bridge error: $data');
     });
 
-    while (mounted && _voiceMode) {
-      try {
-        await _recordAndUploadOneChunk();
-      } catch (e) {
-        debugPrint('voice-chunk loop error: $e');
-        // Brief backoff so a network blip doesn't hot-loop.
-        await Future.delayed(const Duration(milliseconds: 500));
-      }
-    }
+    socket.emitVoiceStart(sid);
 
-    _soundLevel.value = 0.0;
-    _stopLoopCompleter?.complete();
-    _stopLoopCompleter = null;
+    try {
+      _ampSub?.cancel();
+      _ampSub = _recorder!
+          .onAmplitudeChanged(const Duration(milliseconds: 150))
+          .listen((amp) {
+        // amp.current is dBFS (~-160 … 0). Map to a 0..1 bar.
+        final v = ((amp.current + 50) / 50).clamp(0.0, 1.0);
+        _soundLevel.value = v;
+      });
+
+      // Raw 16-bit little-endian mono PCM at 16 kHz — Vosk's native input
+      // format. The recorder emits frames as they're captured (typically
+      // every 20–60ms) so the bridge sees audio with near-zero buffering.
+      final stream = await _recorder!.startStream(
+        const RecordConfig(
+          encoder: AudioEncoder.pcm16bits,
+          sampleRate: _sampleRate,
+          numChannels: 1,
+        ),
+      );
+      _isStreaming = true;
+      if (mounted) setState(() {});
+
+      _pcmSub = stream.listen(
+        (frame) {
+          socket.emitVoiceFrame(frame);
+        },
+        onError: (e) => debugPrint('[voice] pcm stream error: $e'),
+        onDone: () => debugPrint('[voice] pcm stream done'),
+      );
+    } catch (e) {
+      debugPrint('[voice] start failed: $e');
+      _voiceMode = false;
+      if (mounted) setState(() {});
+    }
   }
 
-  Future<void> _stopChunkLoop() async {
+  Future<void> _stopStreaming() async {
     _voiceMode = false;
     try {
       if (await (_recorder?.isRecording() ?? Future.value(false))) {
         await _recorder!.stop();
       }
     } catch (_) {}
+    await _pcmSub?.cancel();
+    _pcmSub = null;
     _ampSub?.cancel();
     _ampSub = null;
-    await _stopLoopCompleter?.future;
-    if (mounted) setState(() => _isListening = false);
-  }
-
-  Future<void> _recordAndUploadOneChunk() async {
-    final sid = _sessionId;
-    if (sid == null || _recorder == null) return;
-
-    final tmpDir = await getTemporaryDirectory();
-    final path =
-        '${tmpDir.path}/voice_chunk_${DateTime.now().millisecondsSinceEpoch}.m4a';
-
-    // 16 kHz mono AAC keeps file size tiny and matches Whisper's native rate.
-    const config = RecordConfig(
-      encoder: AudioEncoder.aacLc,
-      sampleRate: 16000,
-      numChannels: 1,
-      bitRate: 64000,
-    );
-
-    if (mounted) setState(() => _isListening = true);
-    try {
-      await _recorder!.start(config, path: path);
-      await Future.delayed(_chunkDuration);
-      if (!_voiceMode) {
-        try { await _recorder!.stop(); } catch (_) {}
-        return;
-      }
-      final outPath = await _recorder!.stop();
-      if (outPath == null) return;
-
-      if (mounted) setState(() => _isUploading = true);
-      try {
-        final res = await ApiService.postVoiceChunk(
-          sessionId: sid,
-          audioPath: outPath,
-        );
-        _handleVoiceChunkResponse(res);
-      } catch (e) {
-        debugPrint('voice-chunk upload failed: $e');
-      } finally {
-        if (mounted) setState(() => _isUploading = false);
-        // Best-effort cleanup of the temp chunk.
-        try { await File(outPath).delete(); } catch (_) {}
-      }
-    } finally {
-      if (mounted && _voiceMode) setState(() => _isListening = false);
-    }
-  }
-
-  void _handleVoiceChunkResponse(Map<String, dynamic> res) {
-    final match = res['match'];
-    if (match is! Map) return;
-    final stanza = (match['stanza'] as num?)?.toInt();
-    final line = (match['line'] as num?)?.toInt();
-    if (stanza == null || line == null) return;
-    final flat = _flatLineIndex(stanza, line);
-    if (flat == _lastEmittedFlat) return;
-    _lastEmittedFlat = flat;
-    if (_currentLine.value != flat) {
-      _currentLine.value = flat;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _scrollToCurrentLine();
-      });
-    }
-    // Server already broadcast `session:stanzaChanged` to the room; no
-    // additional emit needed from the host.
+    SocketService().emitVoiceEnd();
+    _soundLevel.value = 0.0;
+    if (mounted) setState(() => _isStreaming = false);
   }
 
   int _flatLineIndex(int stanza, int line) {
@@ -454,7 +420,6 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
     HapticFeedback.selectionClick();
     _currentLine.value = flatIndex;
     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToCurrentLine());
-    _lastEmittedFlat = flatIndex;
     final line = _lines[flatIndex];
     final socket = SocketService();
     if (socket.isConnected) {
@@ -529,7 +494,7 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
                     lineKey: _lineKeys[i],
                     index: i,
                     text: _lines[i].text,
-                    currentLine: _currentLine,
+                    isCurrent: _currentLine.value == i,
                     onTap: isHost ? () => _hostJumpToLine(i) : null,
                   ),
                 ),
@@ -552,8 +517,8 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Icon(
-                        _isListening ? Icons.mic : Icons.mic_off,
-                        color: _isListening
+                        _isStreaming ? Icons.mic : Icons.mic_off,
+                        color: _isStreaming
                             ? const Color(0xFFe2b96f)
                             : Colors.white38,
                         size: 16,
@@ -576,8 +541,8 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
                       ),
                       const SizedBox(width: 8),
                       Text(
-                        _isUploading
-                            ? 'Voice follow · transcribing…'
+                        _isStreaming
+                            ? 'Voice follow · listening'
                             : 'Voice follow',
                         style: const TextStyle(
                             color: Colors.white54, fontSize: 11),
@@ -640,41 +605,33 @@ class _GroupLineView extends StatelessWidget {
   final GlobalKey lineKey;
   final int index;
   final String text;
-  final ValueListenable<int> currentLine;
+  final bool isCurrent;
   final VoidCallback? onTap;
 
   const _GroupLineView({
     required this.lineKey,
     required this.index,
     required this.text,
-    required this.currentLine,
+    required this.isCurrent,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return RepaintBoundary(
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: onTap,
-        child: Container(
-          key: lineKey,
-          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
-          child: ValueListenableBuilder<int>(
-            valueListenable: currentLine,
-            builder: (_, cur, _) {
-              final isCurrent = cur == index;
-              return Text(
-                text,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: isCurrent ? const Color(0xFFe2b96f) : Colors.white54,
-                  fontSize: isCurrent ? 20 : 17,
-                  fontWeight: isCurrent ? FontWeight.bold : FontWeight.w400,
-                  height: 1.7,
-                ),
-              );
-            },
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Container(
+        key: lineKey,
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
+        child: Text(
+          text,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: isCurrent ? const Color(0xFFe2b96f) : Colors.white54,
+            fontSize: isCurrent ? 20 : 17,
+            fontWeight: isCurrent ? FontWeight.bold : FontWeight.w400,
+            height: 1.7,
           ),
         ),
       ),

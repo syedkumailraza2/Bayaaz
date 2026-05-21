@@ -142,6 +142,20 @@ router.post('/:id/sessions', auth, async (req, res) => {
       currentStanza: 0,
       currentLine: 0,
     });
+
+    // Notify every member sitting on the group screen so their "Start Session"
+    // button flips to "Join Session" without a manual refresh.
+    const io = req.app.get('io');
+    if (io) {
+      const populated = await Session.findById(session._id)
+        .populate('currentKalamId', 'title category')
+        .populate('queue', 'title category author');
+      io.to('group:' + req.params.id).emit('group:sessionStarted', {
+        groupId: req.params.id,
+        session: populated ? populated.toObject() : session.toObject(),
+      });
+    }
+
     res.status(201).json(session);
   } catch (err) {
     console.error('[startSession] error:', err);
