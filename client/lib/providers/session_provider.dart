@@ -111,8 +111,11 @@ class SessionProvider extends ChangeNotifier {
       unawaited(OfflineSyncService.instance.mirrorSession(_session!));
       final socket = SocketService();
       await socket.connect();
-      socket.joinSession(sessionId);
+      // Register listeners BEFORE emitting session:join so the server's
+      // `session:joined` echo and any racing `session:stanzaChanged` aren't
+      // dropped on the floor.
       _listenToSocket(sessionId);
+      socket.joinSession(sessionId);
     } catch (e) {
       _error = e.toString().replaceAll('Exception: ', '');
     } finally {
@@ -164,6 +167,7 @@ class SessionProvider extends ChangeNotifier {
       if (_session == null || data is! Map) return;
       final stanza = _asInt(data['stanza']) ?? _session!.currentStanza;
       final line = _asInt(data['line']) ?? _session!.currentLine;
+      debugPrint('[socket] session:stanzaChanged → ($stanza,$line)');
       _session = _session!.copyWith(
         currentStanza: stanza,
         currentLine: line,

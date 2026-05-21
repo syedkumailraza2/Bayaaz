@@ -336,31 +336,6 @@ class ApiService {
     }
   }
 
-  /// Voice follow: upload a short audio chunk; server transcribes via Whisper,
-  /// fuzzy-matches against the current kalaam, and broadcasts the new line.
-  /// Returns the raw JSON: {ok, transcript, language_probability, match?, advanced}.
-  static Future<Map<String, dynamic>> postVoiceChunk({
-    required String sessionId,
-    required String audioPath,
-    String language = 'ur',
-    double minScore = 0.4,
-  }) async {
-    final token = await _getToken();
-    final uri = Uri.parse('$kBaseUrl/sessions/$sessionId/voice-chunk');
-    final req = http.MultipartRequest('POST', uri)
-      ..headers['ngrok-skip-browser-warning'] = 'true'
-      ..headers['Authorization'] = token != null ? 'Bearer $token' : ''
-      ..fields['language'] = language
-      ..fields['min_score'] = minScore.toString()
-      ..files.add(await http.MultipartFile.fromPath('audio', audioPath));
-    final streamed = await req.send().timeout(const Duration(seconds: 20));
-    final res = await http.Response.fromStream(streamed);
-    if (res.statusCode == 200) return _parseBody(res);
-    throw Exception(
-      _parseBody(res)['message'] ?? 'voice-chunk failed (${res.statusCode})',
-    );
-  }
-
   static Future<SessionModel> addToQueue(String sessionId, String kalamId) async {
     final res = await http.post(
       Uri.parse('$kBaseUrl/sessions/$sessionId/queue'),

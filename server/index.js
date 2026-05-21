@@ -56,6 +56,22 @@ app.use('/api/invites', inviteRoutes);
 
 app.get('/health', (_, res) => res.json({ status: 'ok' }));
 
+// Render free tier spins services down after ~15 min idle; the first cold
+// request takes 30-50s. Self-ping /health every 5 min to keep the dyno warm.
+// On Render, RENDER_EXTERNAL_URL is auto-injected; locally we ping loopback
+// (harmless, just exercises the route).
+const keepAliveUrl =
+  process.env.RENDER_EXTERNAL_URL ||
+  `http://127.0.0.1:${process.env.PORT || 5000}`;
+setInterval(async () => {
+  try {
+    const res = await fetch(`${keepAliveUrl}/health`);
+    if (!res.ok) console.warn('[keep-alive] non-ok response:', res.status);
+  } catch (err) {
+    console.error('[keep-alive] ping failed:', err.message);
+  }
+}, 5 * 60 * 1000);
+
 // Invite landing page — WhatsApp and most chat apps only linkify http(s) URLs,
 // so we hand out an https URL that bounces to the bayaaz:// custom scheme.
 app.get('/i/:token', (req, res) => {
