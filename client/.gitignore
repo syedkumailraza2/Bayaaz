@@ -44,3 +44,11 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 /ui
+
+# Android release signing secrets (keystore + properties) — never commit these
+android/key.properties
+android/app/*.jks
+android/app/*.keystore
+*.jks
+*.keystore
+

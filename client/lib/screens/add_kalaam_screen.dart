@@ -1,20 +1,22 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:uuid/uuid.dart';
 import '../models/kalaam_model.dart';
 import '../providers/kalaam_provider.dart';
+import '../services/offline_sync_service.dart';
+import '../services/reference_audio_service.dart';
 
 // ─── Brand tokens (theme-invariant) ─────────────────────────────────────────
 const _kTeal = Color(0xFF234547);
-const _kOrange = Color(0xFFFDA944);
 const _kOrangeGrad1 = Color(0xFFFDA43F);
 const _kOrangeGrad2 = Color(0xFFFDBA55);
 const _kInkMutedNeutral = Color(0xFFA0A0A0);
 
-// Field & body constraints from the Figma frame.
-const int _kTitleMaxChars = 30;
 const int _kPoetMaxChars = 40;
-const int _kBodyMaxChars = 300;
 
 // Theme-aware palette — mirrors the home_screen palette so the surfaces
 // align across the app.
@@ -62,6 +64,13 @@ class _AddKalaamScreenState extends State<AddKalaamScreen>
   bool _isPublic = true;
   bool _submitting = false;
 
+  // Final once `didChangeDependencies` has seen the route arguments. We
+  // can't compute this in `initState` because the `/edit` route hands the
+  // kalaam in via `ModalRoute.settings.arguments`, which isn't readable
+  // until `didChangeDependencies` runs.
+  String? _refTempId;
+  bool _refReady = false;
+
   // Existing tag list is preserved verbatim on edit so we don't lose any
   // taxonomy the user (or a future feature) attached on the server side.
   List<String> _baseTags = const [];
@@ -83,6 +92,7 @@ class _AddKalaamScreenState extends State<AddKalaamScreen>
   @override
   void initState() {
     super.initState();
+
     _entryController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 700),
@@ -132,6 +142,15 @@ class _AddKalaamScreenState extends State<AddKalaamScreen>
     super.didChangeDependencies();
     if (_prefilled) return;
     final existing = _existing;
+
+    // Resolve the reference-audio key NOW: on the /edit route the kalaam
+    // arrives via ModalRoute arguments, which `initState` can't see. If we
+    // initialise the tempId there we'd hand a fresh UUID to the reference
+    // section and the picked file would be persisted under that UUID
+    // forever — invisible to the practice screen which looks up the real
+    // kalaam id.
+    _refTempId = existing?.id ?? const Uuid().v4();
+
     if (existing == null) {
       _prefilled = true;
       return;
@@ -209,7 +228,9 @@ class _AddKalaamScreenState extends State<AddKalaamScreen>
 
     final provider = context.read<KalaamProvider>();
     final existing = _existing;
-    final bool success;
+    bool success;
+    KalaamModel? created;
+
     if (existing != null) {
       success = await provider.updateKalaam(
         id: existing.id,
@@ -221,7 +242,7 @@ class _AddKalaamScreenState extends State<AddKalaamScreen>
         tags: _baseTags,
       );
     } else {
-      success = await provider.addKalaam(
+      created = await provider.addKalaam(
         title: title,
         content: content,
         category: category,
@@ -229,17 +250,56 @@ class _AddKalaamScreenState extends State<AddKalaamScreen>
         poet: poet,
         tags: _baseTags,
       );
+      success = created != null;
     }
 
     if (!mounted) return;
     setState(() => _submitting = false);
 
     if (success) {
+      // Link the reference audio temp record to the real kalaam id.
+      // Create: `_refTempId` is a fresh UUID; the new server-assigned id is
+      //   on `created`.
+      // Edit:  `_refTempId` should already equal `existing.id` (resolved in
+      //   `didChangeDependencies`), so this is a no-op fallback — but we
+      //   still call it in case the section was mounted with a UUID before
+      //   args resolved (route races, hot reload, etc.).
+      final tempId = _refTempId;
+      final realId = created?.id ?? existing?.id;
+      if (_refReady && tempId != null && realId != null) {
+        if (tempId != realId) {
+          await ReferenceAudioService.instance.linkToKalaam(
+            tempId: tempId,
+            realId: realId,
+          );
+        }
+        // Push the local file up to the server so anyone else opening this
+        // kalaam on another device can fetch and follow-voice off it.
+        // Fire-and-forget: failure (offline / 5xx) doesn't block the save —
+        // OfflineSyncService will retry on the next reconnect.
+        unawaited(_syncReferenceUp(realId, provider));
+      }
+      if (!mounted) return;
       _showSnack(_isEditing ? 'Kalaam updated' : 'Kalaam created');
       Navigator.pop(context);
     } else {
       _showSnack('Failed to save. Please try again.', isError: true);
     }
+  }
+
+  Future<void> _syncReferenceUp(
+    String kalaamId,
+    KalaamProvider provider,
+  ) async {
+    final updated =
+        await ReferenceAudioService.instance.uploadToServer(kalaamId);
+    if (updated == null) {
+      // Couldn't push right now (likely offline). Queue it so the offline
+      // sync drain retries when the app comes back online.
+      await OfflineSyncService.instance.stashPendingReferenceUpload(kalaamId);
+      return;
+    }
+    provider.applyServerKalaam(updated);
   }
 
   void _showSnack(String message, {bool isError = false}) {
@@ -328,6 +388,18 @@ class _AddKalaamScreenState extends State<AddKalaamScreen>
                       _VisibilityRow(
                         isPublic: _isPublic,
                         onChanged: (v) => setState(() => _isPublic = v),
+                      ),
+
+                      const SizedBox(height: 20),
+
+                      // ── Reference media (optional) ───────────────────────
+                      // `_refTempId` is set in didChangeDependencies once
+                      // ModalRoute args are visible; the section needs a
+                      // stable id for the lifetime of the screen.
+                      _ReferenceMediaSection(
+                        tempId: _refTempId ?? '',
+                        onStateChanged: (ready) =>
+                            setState(() => _refReady = ready),
                       ),
 
                       const SizedBox(height: 20),
@@ -577,12 +649,6 @@ class _TitleField extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = _Palette.of(context);
-    final length = controller.text.characters.length;
-    final remaining = _kTitleMaxChars - length;
-    final counterColor = remaining <= 0
-        ? Colors.redAccent
-        : (remaining <= 5 ? _kOrange : palette.textMuted);
-
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -597,10 +663,6 @@ class _TitleField extends StatelessWidget {
           child: TextFormField(
             controller: controller,
             focusNode: focusNode,
-            maxLength: _kTitleMaxChars,
-            inputFormatters: [
-              LengthLimitingTextInputFormatter(_kTitleMaxChars),
-            ],
             textInputAction: TextInputAction.next,
             style: TextStyle(
               fontSize: 15,
@@ -617,14 +679,6 @@ class _TitleField extends StatelessWidget {
               ),
               border: InputBorder.none,
               counterText: '',
-              suffix: Text(
-                '$length/$_kTitleMaxChars',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: counterColor,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
             ),
             validator: (v) {
               if (v == null || v.trim().isEmpty) return 'Title is required';
@@ -769,12 +823,6 @@ class _BodyField extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = _Palette.of(context);
-    final length = controller.text.characters.length;
-    final remaining = _kBodyMaxChars - length;
-    final counterColor = remaining <= 0
-        ? Colors.redAccent
-        : (remaining <= 5 ? _kOrange : palette.textMuted);
-
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -782,55 +830,33 @@ class _BodyField extends StatelessWidget {
         AnimatedContainer(
           duration: const Duration(milliseconds: 180),
           curve: Curves.easeOut,
-          height: 180,
+          constraints: const BoxConstraints(minHeight: 180),
           decoration: _fieldDecoration(context, focused: focusNode.hasFocus),
-          child: Stack(
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 14, 16, 28),
-                child: TextFormField(
-                  controller: controller,
-                  focusNode: focusNode,
-                  maxLength: _kBodyMaxChars,
-                  inputFormatters: [
-                    LengthLimitingTextInputFormatter(_kBodyMaxChars),
-                  ],
-                  maxLines: null,
-                  minLines: 6,
-                  keyboardType: TextInputType.multiline,
-                  textInputAction: TextInputAction.newline,
-                  style: TextStyle(
-                    fontSize: 14,
-                    color: palette.textPrimary,
-                    height: 1.5,
-                    fontWeight: FontWeight.w500,
-                  ),
-                  decoration: InputDecoration(
-                    isCollapsed: true,
-                    hintText: 'Write your kalaam here',
-                    hintStyle: TextStyle(
-                      fontSize: 14,
-                      color: palette.textMuted,
-                      fontWeight: FontWeight.w500,
-                    ),
-                    border: InputBorder.none,
-                    counterText: '',
-                  ),
-                ),
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+          child: TextFormField(
+            controller: controller,
+            focusNode: focusNode,
+            maxLines: null,
+            minLines: 6,
+            keyboardType: TextInputType.multiline,
+            textInputAction: TextInputAction.newline,
+            style: TextStyle(
+              fontSize: 14,
+              color: palette.textPrimary,
+              height: 1.5,
+              fontWeight: FontWeight.w500,
+            ),
+            decoration: InputDecoration(
+              isCollapsed: true,
+              hintText: 'Write your kalaam here',
+              hintStyle: TextStyle(
+                fontSize: 14,
+                color: palette.textMuted,
+                fontWeight: FontWeight.w500,
               ),
-              Positioned(
-                right: 14,
-                bottom: 10,
-                child: Text(
-                  '$length/$_kBodyMaxChars',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: counterColor,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ),
-            ],
+              border: InputBorder.none,
+              counterText: '',
+            ),
           ),
         ),
       ],
@@ -983,6 +1009,464 @@ class _BackPill extends StatelessWidget {
                 style: TextStyle(
                   fontSize: 14,
                   color: palette.textPrimary,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Reference Media Section ─────────────────────────────────────────────────
+
+enum _RefState { idle, processing, ready, error }
+
+class _ReferenceMediaSection extends StatefulWidget {
+  final String tempId;
+  final void Function(bool ready) onStateChanged;
+
+  const _ReferenceMediaSection({
+    required this.tempId,
+    required this.onStateChanged,
+  });
+
+  @override
+  State<_ReferenceMediaSection> createState() => _ReferenceMediaSectionState();
+}
+
+class _ReferenceMediaSectionState extends State<_ReferenceMediaSection> {
+  _RefState _state = _RefState.idle;
+  bool _showYoutubeInput = false;
+  final _urlController = TextEditingController();
+  String _displayName = '';
+  String _duration = '';
+  String _error = '';
+  double? _downloadProgress;
+  bool _isConnecting = false;
+  String _fetchStatus = '';
+
+  @override
+  void dispose() {
+    _urlController.dispose();
+    super.dispose();
+  }
+
+  String _formatDuration(int ms) {
+    if (ms <= 0) return '–';
+    final total = ms ~/ 1000;
+    final m = total ~/ 60;
+    final s = total % 60;
+    return m > 0 ? '${m}m ${s}s' : '${s}s';
+  }
+
+  Future<void> _process(
+    File source,
+    String sourceType, {
+    String? sourceUrl,
+    required String displayName,
+    String? extension,
+  }) async {
+    setState(() {
+      _state = _RefState.processing;
+      _error = '';
+    });
+    try {
+      final svc = ReferenceAudioService.instance;
+      final filePath = await svc.extractAndNormalize(
+        source,
+        widget.tempId,
+        extension: extension,
+      );
+      final durationMs = await svc.getFileDurationMs(filePath);
+      await svc.saveReference(
+        kalaamId: widget.tempId,
+        wavPath: filePath,
+        sourceType: sourceType,
+        sourceUrl: sourceUrl,
+        durationMs: durationMs,
+      );
+      setState(() {
+        _state = _RefState.ready;
+        _displayName = displayName;
+        _duration = _formatDuration(durationMs);
+      });
+      widget.onStateChanged(true);
+    } catch (_) {
+      setState(() {
+        _state = _RefState.error;
+        _error = 'Processing failed. Try a different file.';
+      });
+      widget.onStateChanged(false);
+    }
+  }
+
+  Future<void> _handleAudioFile() async {
+    final picked = await ReferenceAudioService.instance.pickAudioFile();
+    if (picked == null) return;
+    await _process(
+      picked.file,
+      'audio_file',
+      displayName: picked.file.path.split('/').last,
+      extension: picked.extension,
+    );
+  }
+
+  Future<void> _handleVideoFile() async {
+    final picked = await ReferenceAudioService.instance.pickVideoFile();
+    if (picked == null) return;
+    await _process(
+      picked.file,
+      'video_file',
+      displayName: picked.file.path.split('/').last,
+      extension: picked.extension,
+    );
+  }
+
+  Future<void> _handleYouTubeImport() async {
+    final url = _urlController.text.trim();
+    if (url.isEmpty) return;
+    setState(() {
+      _state = _RefState.processing;
+      _downloadProgress = null;
+      _isConnecting = true;
+      _fetchStatus = 'Resolving stream…';
+      _error = '';
+    });
+    try {
+      final result = await ReferenceAudioService.instance.fetchYouTubeAudio(
+        url,
+        onStatus: (s) {
+          if (mounted) setState(() => _fetchStatus = s);
+        },
+        onProgress: (p) {
+          if (mounted) setState(() { _downloadProgress = p; _isConnecting = false; });
+        },
+      );
+      if (result == null) throw Exception('Invalid URL');
+      setState(() { _downloadProgress = null; _isConnecting = false; });
+      final svc = ReferenceAudioService.instance;
+      final filePath = await svc.extractAndNormalize(result.file, widget.tempId);
+      final durationMs = result.durationMs > 0
+          ? result.durationMs
+          : await svc.getFileDurationMs(filePath);
+      await svc.saveReference(
+        kalaamId: widget.tempId,
+        wavPath: filePath,
+        sourceType: 'youtube',
+        sourceUrl: url,
+        durationMs: durationMs,
+      );
+      setState(() {
+        _state = _RefState.ready;
+        _displayName = 'YouTube Audio';
+        _duration = _formatDuration(durationMs);
+      });
+      widget.onStateChanged(true);
+    } catch (_) {
+      setState(() {
+        _state = _RefState.error;
+        _downloadProgress = null;
+        _isConnecting = false;
+        _error = 'Could not fetch YouTube audio. Check the URL.';
+      });
+      widget.onStateChanged(false);
+    }
+  }
+
+  Future<void> _clear() async {
+    await ReferenceAudioService.instance.deleteReference(widget.tempId);
+    setState(() {
+      _state = _RefState.idle;
+      _displayName = '';
+      _duration = '';
+      _error = '';
+      _showYoutubeInput = false;
+      _urlController.clear();
+    });
+    widget.onStateChanged(false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = _Palette.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const _FieldLabel('Reference Audio'),
+            const SizedBox(width: 6),
+            Text(
+              'optional',
+              style: TextStyle(
+                fontSize: 11,
+                color: palette.textMuted,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+        AnimatedContainer(
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOut,
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: palette.surfaceMuted,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: _state == _RefState.ready
+                  ? _kTeal.withValues(alpha: 0.45)
+                  : Colors.transparent,
+              width: 1.4,
+            ),
+          ),
+          child: switch (_state) {
+            _RefState.processing => _buildProcessing(palette),
+            _RefState.ready => _buildReady(palette),
+            _ => _buildIdle(palette),
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _buildIdle(_Palette palette) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            _MediaButton(
+              icon: Icons.audio_file_outlined,
+              label: 'Audio',
+              onTap: _handleAudioFile,
+              palette: palette,
+            ),
+            const SizedBox(width: 8),
+            _MediaButton(
+              icon: Icons.video_file_outlined,
+              label: 'Video',
+              onTap: _handleVideoFile,
+              palette: palette,
+            ),
+            const SizedBox(width: 8),
+            _MediaButton(
+              icon: Icons.play_circle_outline_rounded,
+              label: 'YouTube',
+              onTap: () =>
+                  setState(() => _showYoutubeInput = !_showYoutubeInput),
+              palette: palette,
+              active: _showYoutubeInput,
+            ),
+          ],
+        ),
+        if (_showYoutubeInput) ...[
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: Container(
+                  height: 42,
+                  decoration: BoxDecoration(
+                    color: palette.pageBg,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  alignment: Alignment.center,
+                  child: TextField(
+                    controller: _urlController,
+                    style: TextStyle(
+                        fontSize: 13, color: palette.textPrimary),
+                    decoration: InputDecoration(
+                      isCollapsed: true,
+                      hintText: 'Paste YouTube URL',
+                      hintStyle: TextStyle(
+                          fontSize: 13, color: palette.textMuted),
+                      border: InputBorder.none,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: _handleYouTubeImport,
+                child: Container(
+                  height: 42,
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  decoration: BoxDecoration(
+                    color: palette.ctaBg,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  alignment: Alignment.center,
+                  child: const Text(
+                    'Import',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+        if (_error.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Text(
+            _error,
+            style:
+                const TextStyle(fontSize: 12, color: Colors.redAccent),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildProcessing(_Palette palette) {
+    final progress = _downloadProgress;
+    if (progress != null) {
+      // progress >= 0: determinate (show %). progress < 0: indeterminate (size unknown).
+      final isDeterminate = progress >= 0;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2, color: _kTeal),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                isDeterminate
+                    ? 'Downloading… ${(progress * 100).toStringAsFixed(0)}%'
+                    : 'Downloading…',
+                style: TextStyle(fontSize: 13, color: palette.textSecondary),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: isDeterminate ? progress : null,
+              minHeight: 4,
+              backgroundColor: palette.pageBg,
+              valueColor: const AlwaysStoppedAnimation(_kTeal),
+            ),
+          ),
+        ],
+      );
+    }
+    final label = _isConnecting
+        ? (_fetchStatus.isNotEmpty ? _fetchStatus : 'Fetching audio…')
+        : 'Processing audio…';
+    return Row(
+      children: [
+        const SizedBox(
+          width: 16,
+          height: 16,
+          child: CircularProgressIndicator(strokeWidth: 2, color: _kTeal),
+        ),
+        const SizedBox(width: 12),
+        Text(
+          label,
+          style: TextStyle(fontSize: 13, color: palette.textSecondary),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildReady(_Palette palette) {
+    return Row(
+      children: [
+        const Icon(Icons.check_circle_outline_rounded,
+            color: _kTeal, size: 18),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                _displayName,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: palette.textPrimary,
+                  fontWeight: FontWeight.w600,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              Text(
+                _duration,
+                style: TextStyle(
+                    fontSize: 11, color: palette.textSecondary),
+              ),
+            ],
+          ),
+        ),
+        GestureDetector(
+          onTap: _clear,
+          child: Icon(Icons.close_rounded,
+              size: 18, color: palette.textMuted),
+        ),
+      ],
+    );
+  }
+}
+
+// ─── Media source button ─────────────────────────────────────────────────────
+
+class _MediaButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final _Palette palette;
+  final bool active;
+
+  const _MediaButton({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    required this.palette,
+    this.active = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          height: 40,
+          decoration: BoxDecoration(
+            color: active
+                ? _kTeal.withValues(alpha: 0.1)
+                : palette.pageBg,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: active
+                  ? _kTeal.withValues(alpha: 0.4)
+                  : Colors.transparent,
+            ),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon,
+                  size: 15,
+                  color: active ? _kTeal : palette.textSecondary),
+              const SizedBox(width: 5),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: active ? _kTeal : palette.textSecondary,
                   fontWeight: FontWeight.w600,
                 ),
               ),

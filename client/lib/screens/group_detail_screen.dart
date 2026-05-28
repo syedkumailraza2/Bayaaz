@@ -11,6 +11,39 @@ import '../services/api_service.dart';
 import '../services/socket_service.dart';
 import 'kalaam_picker_sheet.dart';
 
+// ─── Brand tokens ─────────────────────────────────────────────────────────────
+const _kTeal = Color(0xFF234547);
+const _kOrangeGrad1 = Color(0xFFFDA43F);
+const _kOrangeGrad2 = Color(0xFFFDBA55);
+
+class _Palette {
+  final bool isDark;
+  const _Palette._(this.isDark);
+  factory _Palette.of(BuildContext c) =>
+      _Palette._(Theme.of(c).brightness == Brightness.dark);
+
+  Color get pageBg => isDark ? const Color(0xFF0A0A0A) : Colors.white;
+  Color get cardBg => isDark ? const Color(0xFF161616) : Colors.white;
+  Color get surfaceMuted =>
+      isDark ? const Color(0xFF1A1A1A) : const Color(0xFFF4F4F4);
+  Color get textPrimary => isDark ? Colors.white : Colors.black;
+  Color get textSecondary =>
+      isDark ? const Color(0xFFCFCFCF) : const Color(0xFF545454);
+  Color get textMuted => const Color(0xFFA0A0A0);
+  Color get borderColor => isDark
+      ? Colors.white.withValues(alpha: 0.06)
+      : Colors.black.withValues(alpha: 0.07);
+  List<BoxShadow> get cardShadow => isDark
+      ? const []
+      : [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.07),
+            blurRadius: 9.5,
+            offset: const Offset(0, 4),
+          ),
+        ];
+}
+
 class GroupDetailScreen extends StatefulWidget {
   const GroupDetailScreen({super.key});
 
@@ -20,14 +53,14 @@ class GroupDetailScreen extends StatefulWidget {
 
 class _GroupDetailScreenState extends State<GroupDetailScreen> {
   GroupModel? _group;
-  String? _pendingGroupId; // arrived via deep-link Map arg
+  String? _pendingGroupId;
   String? _pendingGroupName;
   String? _loadError;
   SessionModel? _activeSession;
   bool _loadingSession = false;
   bool _loadingGroup = false;
   List<QueueSnapshotSummary> _snapshots = const [];
-  String? _joinedGroupId; // group room we're currently subscribed to
+  String? _joinedGroupId;
 
   @override
   void didChangeDependencies() {
@@ -41,20 +74,15 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
       groupId = arg.id;
       _loadFreshData(arg.id);
     } else if (arg is Map && arg['groupId'] is String) {
-      // Came from the deep-link redeem flow. We only have the id; fetch the rest.
       _pendingGroupId = arg['groupId'] as String;
-      _pendingGroupName = arg['groupName'] is String ? arg['groupName'] as String : null;
+      _pendingGroupName =
+          arg['groupName'] is String ? arg['groupName'] as String : null;
       groupId = _pendingGroupId;
       _loadFreshData(_pendingGroupId!);
     }
     if (groupId != null) _attachGroupSocket(groupId);
   }
 
-  /// Subscribe to group-level realtime events so the Start/Join Session button
-  /// flips the moment a host starts (or ends) a session — no back-and-return
-  /// dance required. Pin the room ID immediately so reconnects from the
-  /// SocketService lifecycle re-emit the join, and use a guard flag so
-  /// rapid didChangeDependencies cycles don't double-register listeners.
   bool _attachingSocket = false;
   Future<void> _attachGroupSocket(String groupId) async {
     if (_joinedGroupId == groupId || _attachingSocket) return;
@@ -71,13 +99,13 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
       _attachingSocket = false;
       return;
     }
-    // Register listeners FIRST so the server's emit-on-join echo isn't dropped.
     socket.on('group:sessionStarted', _onGroupSessionStarted);
     socket.on('group:sessionEnded', _onGroupSessionEnded);
     socket.joinGroup(groupId);
     _joinedGroupId = groupId;
     _attachingSocket = false;
-    debugPrint('[group-detail] joined group:$groupId  connected=${socket.isConnected}');
+    debugPrint(
+        '[group-detail] joined group:$groupId  connected=${socket.isConnected}');
   }
 
   void _onGroupSessionStarted(dynamic data) {
@@ -126,14 +154,14 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
       setState(() => _group = fresh);
     } catch (e) {
       if (!mounted) return;
-      // Only surface the error when we have nothing else to render.
       if (_group == null) {
-        setState(() => _loadError = e.toString().replaceAll('Exception: ', ''));
+        setState(() =>
+            _loadError = e.toString().replaceAll('Exception: ', ''));
       }
     } finally {
       if (mounted) setState(() => _loadingGroup = false);
     }
-    if (_group == null) return; // bail out of follow-up loads if group never resolved
+    if (_group == null) return;
 
     setState(() => _loadingSession = true);
     try {
@@ -151,42 +179,60 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
     setState(() => _snapshots = snaps);
   }
 
+  // ignore: unused_element
   Future<void> _showAddMemberDialog() async {
     final controller = TextEditingController();
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1a1a2e),
-        title: const Text('Add Member',
-            style: TextStyle(color: Colors.white)),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          style: const TextStyle(color: Colors.white),
-          decoration: InputDecoration(
-            hintText: 'User ID',
-            hintStyle: const TextStyle(color: Colors.white38),
-            enabledBorder: OutlineInputBorder(
-              borderSide: const BorderSide(color: Colors.white24),
-              borderRadius: BorderRadius.circular(8),
+      builder: (ctx) {
+        final p = _Palette.of(ctx);
+        return AlertDialog(
+          backgroundColor: p.cardBg,
+          surfaceTintColor: Colors.transparent,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: Text(
+            'Add Member',
+            style: TextStyle(
+                color: p.textPrimary, fontWeight: FontWeight.bold),
+          ),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            style: TextStyle(color: p.textPrimary),
+            decoration: InputDecoration(
+              hintText: 'User ID',
+              hintStyle: TextStyle(color: p.textMuted),
+              filled: true,
+              fillColor: p.surfaceMuted,
+              border: OutlineInputBorder(
+                borderSide: BorderSide.none,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderSide: const BorderSide(color: _kTeal, width: 1.5),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
             ),
-            focusedBorder: OutlineInputBorder(
-              borderSide: const BorderSide(color: Color(0xFFe2b96f)),
-              borderRadius: BorderRadius.circular(8),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text('Cancel', style: TextStyle(color: p.textMuted)),
             ),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel', style: TextStyle(color: Colors.white54)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Add', style: TextStyle(color: Color(0xFFe2b96f))),
-          ),
-        ],
-      ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text(
+                'Add',
+                style:
+                    TextStyle(color: _kTeal, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        );
+      },
     );
 
     if (confirmed == true && controller.text.trim().isNotEmpty && mounted) {
@@ -219,7 +265,8 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
     final invite =
         await context.read<GroupProvider>().createInvite(group.id, type: type);
     if (invite == null) {
-      messenger.showSnackBar(const SnackBar(content: Text('Could not create invite')));
+      messenger.showSnackBar(
+          const SnackBar(content: Text('Could not create invite')));
       return;
     }
     final label = type == 'guest' ? 'guest pass' : 'invite';
@@ -233,10 +280,8 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
     final group = _group;
     if (group == null) return;
 
-    // Let the host pick kalaams for the initial queue. Returns the picked
-    // IDs in tap order; null means the host cancelled.
     final picked = await showSessionQueueBuilder(context);
-    if (picked == null) return; // host cancelled
+    if (picked == null) return;
     if (!mounted) return;
 
     final messenger = ScaffoldMessenger.of(context);
@@ -247,28 +292,34 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
           );
       if (!mounted) return;
       if (session != null) {
-        Navigator.pushNamed(context, '/group-teleprompter', arguments: session);
+        Navigator.pushNamed(context, '/group-teleprompter',
+            arguments: session);
       }
     } catch (e) {
       messenger.showSnackBar(
-        SnackBar(content: Text(e.toString().replaceAll('Exception: ', ''))),
+        SnackBar(
+            content: Text(e.toString().replaceAll('Exception: ', ''))),
       );
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final palette = _Palette.of(context);
     final group = _group;
+
     if (group == null) {
       return Scaffold(
-        backgroundColor: const Color(0xFF0f0f1a),
+        backgroundColor: palette.pageBg,
         appBar: AppBar(
-          backgroundColor: const Color(0xFF1a1a2e),
+          backgroundColor: _kTeal,
+          foregroundColor: Colors.white,
+          elevation: 0,
           title: Text(
             _pendingGroupName ?? 'Group',
-            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+            style: const TextStyle(
+                color: Colors.white, fontWeight: FontWeight.bold),
           ),
-          iconTheme: const IconThemeData(color: Colors.white),
         ),
         body: Center(
           child: _loadError != null
@@ -277,27 +328,31 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Icon(Icons.cloud_off, color: Colors.redAccent, size: 48),
+                      const Icon(Icons.cloud_off,
+                          color: Colors.redAccent, size: 48),
                       const SizedBox(height: 12),
                       Text(
                         _loadError!,
                         textAlign: TextAlign.center,
-                        style: const TextStyle(color: Colors.white70),
+                        style: TextStyle(color: palette.textSecondary),
                       ),
-                      const SizedBox(height: 16),
-                      FilledButton(
-                        style: FilledButton.styleFrom(
-                          backgroundColor: const Color(0xFFe2b96f),
-                          foregroundColor: Colors.black,
+                      const SizedBox(height: 20),
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: _kTeal,
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(10)),
                         ),
                         onPressed: () =>
-                            _loadFreshData(_pendingGroupId ?? group?.id ?? ''),
+                            _loadFreshData(_pendingGroupId ?? ''),
                         child: const Text('Retry'),
                       ),
                     ],
                   ),
                 )
-              : const CircularProgressIndicator(color: Color(0xFFe2b96f)),
+              : const CircularProgressIndicator(
+                  color: _kTeal, strokeWidth: 2),
         ),
       );
     }
@@ -311,12 +366,16 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
     final isMember = group.members.any((m) => m.id == currentUserId);
 
     return Scaffold(
-      backgroundColor: const Color(0xFF0f0f1a),
+      backgroundColor: palette.pageBg,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF1a1a2e),
-        title: Text(group.name,
-            style: const TextStyle(
-                color: Colors.white, fontWeight: FontWeight.bold)),
+        backgroundColor: _kTeal,
+        foregroundColor: Colors.white,
+        elevation: 0,
+        title: Text(
+          group.name,
+          style: const TextStyle(
+              color: Colors.white, fontWeight: FontWeight.bold),
+        ),
         iconTheme: const IconThemeData(color: Colors.white),
         actions: [
           if (_loadingGroup)
@@ -326,29 +385,37 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
                 width: 18,
                 height: 18,
                 child: CircularProgressIndicator(
-                    color: Color(0xFFe2b96f), strokeWidth: 2),
+                    color: Colors.white, strokeWidth: 2),
               ),
             ),
           if (isMember)
             PopupMenuButton<String>(
-              icon: const Icon(Icons.share, color: Color(0xFFe2b96f)),
-              color: const Color(0xFF1a1a2e),
+              icon: const Icon(Icons.share_outlined, color: Colors.white),
+              color: palette.cardBg,
               onSelected: _createAndShareInvite,
-              itemBuilder: (_) => const [
+              itemBuilder: (_) => [
                 PopupMenuItem(
                   value: 'permanent',
                   child: ListTile(
-                    leading: Icon(Icons.person_add, color: Color(0xFFe2b96f)),
-                    title: Text('Invite member (permanent)',
-                        style: TextStyle(color: Colors.white)),
+                    leading:
+                        const Icon(Icons.person_add, color: _kTeal),
+                    title: Text('Invite member',
+                        style: TextStyle(color: palette.textPrimary)),
+                    subtitle: Text('Permanent access',
+                        style: TextStyle(
+                            color: palette.textMuted, fontSize: 12)),
                   ),
                 ),
                 PopupMenuItem(
                   value: 'guest',
                   child: ListTile(
-                    leading: Icon(Icons.flash_on, color: Color(0xFFe2b96f)),
-                    title: Text('Guest pass (one session)',
-                        style: TextStyle(color: Colors.white)),
+                    leading:
+                        const Icon(Icons.bolt, color: _kOrangeGrad1),
+                    title: Text('Guest pass',
+                        style: TextStyle(color: palette.textPrimary)),
+                    subtitle: Text('One session only',
+                        style: TextStyle(
+                            color: palette.textMuted, fontSize: 12)),
                   ),
                 ),
               ],
@@ -357,92 +424,57 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
       ),
       body: SafeArea(
         child: ListView(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.fromLTRB(16, 20, 16, 40),
           children: [
-            _SectionHeader(label: 'Members (${group.members.length})'),
-            const SizedBox(height: 8),
+            _SectionHeader(
+              label: 'Members',
+              count: group.members.length,
+              palette: palette,
+            ),
+            const SizedBox(height: 10),
             ...group.members.map((member) => _MemberTile(
                   member: member,
+                  palette: palette,
                   canDelete: isAdmin &&
                       member.id != group.createdById &&
                       member.id != currentUserId,
                   onDelete: () => _removeMember(member.id),
                 )),
-            const SizedBox(height: 32),
-            _SectionHeader(label: 'Session'),
-            const SizedBox(height: 12),
-            if (_loadingSession)
-              const Center(
-                child: CircularProgressIndicator(color: Color(0xFFe2b96f)),
-              )
-            else if (_activeSession != null)
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFFe2b96f),
-                    foregroundColor: Colors.black,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12)),
-                  ),
-                  icon: const Icon(Icons.play_circle_outline),
-                  label: const Text('Join Session',
-                      style: TextStyle(
-                          fontWeight: FontWeight.bold, fontSize: 16)),
-                  onPressed: () => Navigator.pushNamed(
-                    context,
-                    '/group-teleprompter',
-                    arguments: _activeSession,
-                  ),
-                ),
-              )
-            else
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFFe2b96f),
-                    foregroundColor: Colors.black,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12)),
-                  ),
-                  icon: const Icon(Icons.fiber_manual_record, size: 14),
-                  label: const Text('Start Session',
-                      style: TextStyle(
-                          fontWeight: FontWeight.bold, fontSize: 16)),
-                  onPressed: _startSession,
-                ),
+            const SizedBox(height: 28),
+            _SectionHeader(label: 'Session', palette: palette),
+            const SizedBox(height: 14),
+            _SessionCta(
+              loadingSession: _loadingSession,
+              activeSession: _activeSession,
+              onJoin: () => Navigator.pushNamed(
+                context,
+                '/group-teleprompter',
+                arguments: _activeSession,
               ),
-            const SizedBox(height: 24),
+              onStart: _startSession,
+            ),
             if (_snapshots.isNotEmpty) ...[
-              _SectionHeader(label: 'Past queues'),
-              const SizedBox(height: 8),
+              const SizedBox(height: 28),
+              _SectionHeader(label: 'Past queues', palette: palette),
+              const SizedBox(height: 10),
               ..._snapshots.map(_buildSnapshotTile),
             ],
-            const SizedBox(height: 16),
           ],
         ),
       ),
-      // floatingActionButton: isAdmin
-      //     ? FloatingActionButton(
-      //         backgroundColor: const Color(0xFFe2b96f),
-      //         onPressed: _showAddMemberDialog,
-      //         child: const Icon(Icons.person_add, color: Colors.black),
-      //       )
-      //     : null,
     );
   }
 
   Widget _buildSnapshotTile(QueueSnapshotSummary s) {
+    final palette = _Palette.of(context);
     return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
-        color: const Color(0xFF1a1a2e),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.white12),
+        color: palette.cardBg,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: palette.borderColor),
+        boxShadow: palette.cardShadow,
       ),
       child: Row(
         children: [
@@ -451,13 +483,18 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  '${s.items.length} kalaams',
-                  style: const TextStyle(
-                      color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                  '${s.items.length} kalaam${s.items.length == 1 ? '' : 's'}',
+                  style: TextStyle(
+                    color: palette.textPrimary,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
+                const SizedBox(height: 2),
                 Text(
                   _formatDate(s.createdAt),
-                  style: const TextStyle(color: Colors.white38, fontSize: 12),
+                  style:
+                      TextStyle(color: palette.textMuted, fontSize: 12),
                 ),
                 if (s.items.isNotEmpty)
                   Padding(
@@ -466,15 +503,16 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
                       s.items.take(3).map((k) => k.title).join(' · '),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: Colors.white54, fontSize: 12),
+                      style: TextStyle(
+                          color: palette.textMuted, fontSize: 12),
                     ),
                   ),
               ],
             ),
           ),
           IconButton(
-            icon: const Icon(Icons.replay,
-                color: Color(0xFFe2b96f), size: 20),
+            icon: const Icon(Icons.replay_rounded,
+                color: _kTeal, size: 20),
             tooltip: 'Start session with this queue',
             onPressed: _activeSession != null
                 ? null
@@ -496,79 +534,199 @@ class _GroupDetailScreenState extends State<GroupDetailScreen> {
           .startSession(group.id, loadFromSnapshotId: snapshotId);
       if (!mounted) return;
       if (session != null) {
-        Navigator.pushNamed(context, '/group-teleprompter', arguments: session);
+        Navigator.pushNamed(context, '/group-teleprompter',
+            arguments: session);
       }
     } catch (e) {
       messenger.showSnackBar(
-        SnackBar(content: Text(e.toString().replaceAll('Exception: ', ''))),
+        SnackBar(
+            content: Text(e.toString().replaceAll('Exception: ', ''))),
       );
     }
   }
 
   String _formatDate(DateTime d) {
-    return '${d.day}/${d.month}/${d.year} ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+    return '${d.day}/${d.month}/${d.year} '
+        '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
   }
 }
 
-class _SectionHeader extends StatelessWidget {
-  final String label;
-  const _SectionHeader({required this.label});
+// ─── Session CTA ─────────────────────────────────────────────────────────────
+
+class _SessionCta extends StatelessWidget {
+  final bool loadingSession;
+  final SessionModel? activeSession;
+  final VoidCallback onJoin;
+  final VoidCallback onStart;
+
+  const _SessionCta({
+    required this.loadingSession,
+    required this.activeSession,
+    required this.onJoin,
+    required this.onStart,
+  });
 
   @override
   Widget build(BuildContext context) {
+    if (loadingSession) {
+      return const Center(
+        child: CircularProgressIndicator(color: _kTeal, strokeWidth: 2),
+      );
+    }
+    if (activeSession != null) {
+      return _GradientCta(
+        label: 'Join Session',
+        icon: Icons.play_circle_outline_rounded,
+        gradient: const LinearGradient(
+          begin: Alignment.centerLeft,
+          end: Alignment.centerRight,
+          colors: [Color(0xFF2E5B5E), _kTeal],
+        ),
+        onTap: onJoin,
+      );
+    }
+    return _GradientCta(
+      label: 'Start Session',
+      icon: Icons.fiber_manual_record_rounded,
+      gradient: const LinearGradient(
+        begin: Alignment.centerLeft,
+        end: Alignment.centerRight,
+        colors: [_kOrangeGrad1, _kOrangeGrad2],
+      ),
+      onTap: onStart,
+    );
+  }
+}
+
+class _GradientCta extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final LinearGradient gradient;
+  final VoidCallback onTap;
+
+  const _GradientCta({
+    required this.label,
+    required this.icon,
+    required this.gradient,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 16),
+        decoration: BoxDecoration(
+          gradient: gradient,
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: Colors.white, size: 18),
+            const SizedBox(width: 8),
+            Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 15,
+                letterSpacing: -0.3,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Section header ───────────────────────────────────────────────────────────
+
+class _SectionHeader extends StatelessWidget {
+  final String label;
+  final int? count;
+  final _Palette palette;
+
+  const _SectionHeader({
+    required this.label,
+    required this.palette,
+    this.count,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final display = count != null ? '$label ($count)' : label;
     return Row(
       children: [
         Text(
-          label,
-          style: const TextStyle(
-            color: Color(0xFFe2b96f),
-            fontSize: 13,
+          display,
+          style: TextStyle(
+            color: palette.isDark
+                ? Colors.white.withValues(alpha: 0.45)
+                : _kTeal,
+            fontSize: 11,
             fontWeight: FontWeight.w600,
-            letterSpacing: 0.5,
+            letterSpacing: 0.8,
           ),
         ),
-        const SizedBox(width: 8),
-        const Expanded(child: Divider(color: Colors.white12)),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Divider(
+            color: palette.borderColor,
+            thickness: 1,
+          ),
+        ),
       ],
     );
   }
 }
 
+// ─── Member tile ──────────────────────────────────────────────────────────────
+
 class _MemberTile extends StatelessWidget {
   final GroupMember member;
   final bool canDelete;
   final VoidCallback onDelete;
+  final _Palette palette;
 
   const _MemberTile({
     required this.member,
     required this.canDelete,
     required this.onDelete,
+    required this.palette,
   });
 
   @override
   Widget build(BuildContext context) {
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
-        color: const Color(0xFF1a1a2e),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.white12),
+        color: palette.cardBg,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: palette.borderColor),
+        boxShadow: palette.cardShadow,
       ),
       child: Row(
         children: [
           CircleAvatar(
             radius: 20,
-            backgroundColor: const Color(0xFFe2b96f),
-            backgroundImage:
-                member.avatar != null ? NetworkImage(member.avatar!) : null,
+            backgroundColor: _kTeal.withValues(alpha: 0.15),
+            backgroundImage: member.avatar != null
+                ? NetworkImage(member.avatar!)
+                : null,
             child: member.avatar == null
                 ? Text(
                     member.name.isNotEmpty
                         ? member.name[0].toUpperCase()
                         : '?',
                     style: const TextStyle(
-                        color: Colors.black, fontWeight: FontWeight.bold),
+                      color: _kTeal,
+                      fontWeight: FontWeight.bold,
+                    ),
                   )
                 : null,
           ),
@@ -576,7 +734,11 @@ class _MemberTile extends StatelessWidget {
           Expanded(
             child: Text(
               member.name,
-              style: const TextStyle(color: Colors.white, fontSize: 15),
+              style: TextStyle(
+                color: palette.textPrimary,
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+              ),
             ),
           ),
           if (member.role == 'admin')
@@ -584,27 +746,31 @@ class _MemberTile extends StatelessWidget {
               padding:
                   const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
               decoration: BoxDecoration(
-                color: const Color(0xFFe2b96f).withValues(alpha: 0.15),
+                color: _kTeal.withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(6),
-                border: Border.all(
-                    color: const Color(0xFFe2b96f).withValues(alpha: 0.4)),
+                border:
+                    Border.all(color: _kTeal.withValues(alpha: 0.30)),
               ),
-              child: const Text(
+              child: Text(
                 'Admin',
                 style: TextStyle(
-                    color: Color(0xFFe2b96f),
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600),
+                  color: palette.isDark
+                      ? Colors.white.withValues(alpha: 0.80)
+                      : _kTeal,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
           if (canDelete) ...[
             const SizedBox(width: 8),
-            IconButton(
-              icon: const Icon(Icons.remove_circle_outline,
-                  color: Colors.redAccent, size: 20),
-              onPressed: onDelete,
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(),
+            GestureDetector(
+              onTap: onDelete,
+              child: const Icon(
+                Icons.remove_circle_outline_rounded,
+                color: Colors.redAccent,
+                size: 20,
+              ),
             ),
           ],
         ],

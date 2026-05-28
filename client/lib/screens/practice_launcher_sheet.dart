@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/kalaam_model.dart';
 import '../providers/practice_provider.dart';
+import '../services/device_capability_service.dart';
 
 void showPracticeLauncher(BuildContext context, KalaamModel kalaam) {
   showModalBottomSheet(
@@ -45,13 +46,26 @@ class _PracticeLauncherSheet extends StatelessWidget {
             ),
             const SizedBox(height: 20),
             // Header
-            Text(
-              'Practice',
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 22,
-                fontWeight: FontWeight.bold,
-              ),
+            Row(
+              children: [
+                const Text(
+                  'Practice',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const Spacer(),
+                GestureDetector(
+                  onTap: () {
+                    Navigator.pop(context);
+                    Navigator.pushNamed(context, '/packs');
+                  },
+                  child: const Icon(Icons.download_outlined,
+                      color: Color(0xFFe2b96f), size: 20),
+                ),
+              ],
             ),
             const SizedBox(height: 4),
             Text(
@@ -70,7 +84,7 @@ class _PracticeLauncherSheet extends StatelessWidget {
               title: 'Solo',
               subtitle: 'Read at your own pace',
               mode: 'solo',
-              showResume: hasResume && (progress?.mode == 'solo'),
+              showResume: hasResume && (progress!.mode == 'solo'),
               onTap: () {
                 Navigator.pop(context);
                 Navigator.pushNamed(
@@ -86,7 +100,7 @@ class _PracticeLauncherSheet extends StatelessWidget {
               title: 'Follow',
               subtitle: 'Auto-advance line by line',
               mode: 'follow',
-              showResume: hasResume && (progress?.mode == 'follow'),
+              showResume: hasResume && (progress!.mode == 'follow'),
               onTap: () {
                 Navigator.pop(context);
                 Navigator.pushNamed(
@@ -100,10 +114,10 @@ class _PracticeLauncherSheet extends StatelessWidget {
             _ModeCard(
               icon: Icons.headphones_outlined,
               title: 'Listen',
-              subtitle: 'Audio-guided (coming soon)',
+              subtitle: 'Recite and get scored',
               mode: 'listen',
               showResume: false,
-              disabled: true,
+              tierBadge: _tierLabel(DeviceCapabilityService.instance.tier),
               onTap: () {
                 Navigator.pop(context);
                 Navigator.pushNamed(
@@ -120,6 +134,12 @@ class _PracticeLauncherSheet extends StatelessWidget {
   }
 }
 
+String? _tierLabel(DeviceTier tier) => switch (tier) {
+      DeviceTier.low => 'Basic',
+      DeviceTier.mid => 'AI Ready',
+      DeviceTier.high => 'AI Coaching',
+    };
+
 class _ModeCard extends StatelessWidget {
   final IconData icon;
   final String title;
@@ -127,6 +147,7 @@ class _ModeCard extends StatelessWidget {
   final String mode;
   final bool showResume;
   final bool disabled;
+  final String? tierBadge;
   final VoidCallback onTap;
 
   const _ModeCard({
@@ -136,7 +157,9 @@ class _ModeCard extends StatelessWidget {
     required this.mode,
     required this.showResume,
     required this.onTap,
+    // ignore: unused_element_parameter
     this.disabled = false,
+    this.tierBadge,
   });
 
   @override
@@ -209,6 +232,25 @@ class _ModeCard extends StatelessWidget {
                           color: Color(0xFFe2b96f),
                           fontSize: 11,
                           fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                  if (tierBadge != null) ...[
+                    const SizedBox(height: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.08),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        tierBadge!,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.4,
                         ),
                       ),
                     ),

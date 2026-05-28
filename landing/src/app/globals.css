@@ -1,0 +1,146 @@
+@import "tailwindcss";
+
+@theme {
+  --color-surface: #f6fbf5;
+  --color-surface-container-low: #f0f5ef;
+  --color-surface-container: #eaefe9;
+  --color-surface-container-high: #e5e9e4;
+  --color-on-surface: #181d19;
+  --color-on-surface-variant: #404942;
+  --color-outline: #707971;
+  --color-outline-variant: #c0c9bf;
+
+  --color-primary: #003119;
+  --color-on-primary: #ffffff;
+  --color-primary-container: #054a29;
+  --color-on-primary-container: #7bb98f;
+  --color-primary-fixed: #b1f1c3;
+  --color-primary-fixed-dim: #96d5a8;
+
+  --color-secondary: #006e2d;
+  --color-on-secondary: #ffffff;
+  --color-secondary-fixed-dim: #62df7d;
+
+  --font-display: var(--font-geist-sans);
+  --font-body: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-urdu: var(--font-naskh);
+}
+
+:root {
+  --background: #ffffff;
+  --foreground: #181d19;
+  --hairline: #e6eae7;
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 80px;
+}
+
+html,
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+body {
+  overflow-x: hidden;
+}
+
+.grid-bg {
+  background-image: radial-gradient(#e6eae7 1px, transparent 1px);
+  background-size: 24px 24px;
+  -webkit-mask-image: radial-gradient(ellipse at center, black, transparent 80%);
+  mask-image: radial-gradient(ellipse at center, black, transparent 80%);
+}
+
+.hairline {
+  border: 1px solid var(--hairline);
+}
+.hairline-b {
+  border-bottom: 1px solid var(--hairline);
+}
+.hairline-t {
+  border-top: 1px solid var(--hairline);
+}
+.hairline-r {
+  border-right: 1px solid var(--hairline);
+}
+.hairline-l {
+  border-left: 1px solid var(--hairline);
+}
+
+.marquee-container {
+  overflow: hidden;
+  white-space: nowrap;
+}
+.marquee-content {
+  display: inline-block;
+  animation: marquee 30s linear infinite;
+}
+@keyframes marquee {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.pulse-emerald {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.bento-card {
+  background: #ffffff;
+  transition: all 0.3s ease;
+}
+.bento-card:hover {
+  border-color: #054a29;
+}
+
+.legal-prose h2 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--color-primary);
+  margin-top: 2.5rem;
+  margin-bottom: 1rem;
+  letter-spacing: -0.01em;
+}
+.legal-prose h3 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--color-primary);
+  margin-top: 1.75rem;
+  margin-bottom: 0.5rem;
+}
+.legal-prose p,
+.legal-prose li {
+  font-size: 1rem;
+  line-height: 1.7;
+  color: var(--color-on-surface-variant);
+}
+.legal-prose p {
+  margin-bottom: 1rem;
+}
+.legal-prose ul {
+  list-style: disc;
+  padding-left: 1.25rem;
+  margin-bottom: 1rem;
+}
+.legal-prose li {
+  margin-bottom: 0.5rem;
+}
+.legal-prose strong {
+  color: var(--color-on-surface);
+}

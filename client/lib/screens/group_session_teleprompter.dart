@@ -12,6 +12,43 @@ import '../providers/session_provider.dart';
 import '../services/api_service.dart';
 import '../services/socket_service.dart';
 
+// ─── Brand tokens ─────────────────────────────────────────────────────────────
+const _kTeal = Color(0xFF234547);
+const _kOrange = Color(0xFFFDA43F);
+const _kOrangeGrad2 = Color(0xFFFDBA55);
+
+class _Palette {
+  final bool isDark;
+  const _Palette._(this.isDark);
+  factory _Palette.of(BuildContext c) =>
+      _Palette._(Theme.of(c).brightness == Brightness.dark);
+
+  Color get pageBg => isDark ? const Color(0xFF0A0A0A) : Colors.white;
+  Color get cardBg => isDark ? const Color(0xFF161616) : Colors.white;
+  Color get surfaceMuted =>
+      isDark ? const Color(0xFF1A1A1A) : const Color(0xFFF4F4F4);
+  Color get textPrimary => isDark ? Colors.white : Colors.black;
+  Color get textSecondary =>
+      isDark ? const Color(0xFFCFCFCF) : const Color(0xFF545454);
+  Color get textMuted => const Color(0xFFA0A0A0);
+
+  // Teleprompter-specific
+  Color get lineDim => isDark
+      ? Colors.white.withValues(alpha: 0.28)
+      : Colors.black.withValues(alpha: 0.38);
+  Color get separatorDot => isDark
+      ? Colors.white.withValues(alpha: 0.18)
+      : Colors.black.withValues(alpha: 0.12);
+  Color get bottomBarBg =>
+      isDark ? const Color(0xFF0E0E0E) : const Color(0xFFF5F5F5);
+  Color get bottomBarBorder => isDark
+      ? Colors.white.withValues(alpha: 0.06)
+      : Colors.black.withValues(alpha: 0.07);
+  Color get overlayGradientOpaque => isDark
+      ? const Color(0xDD0A0A0A)
+      : Colors.white.withValues(alpha: 0.87);
+}
+
 /// Line-by-line teleprompter for an in-progress group session.
 ///
 /// Host: single-tap any line to highlight + broadcast it (`host:setStanza`).
@@ -25,7 +62,8 @@ class GroupSessionTeleprompter extends StatefulWidget {
   const GroupSessionTeleprompter({super.key});
 
   @override
-  State<GroupSessionTeleprompter> createState() => _GroupSessionTeleprompterState();
+  State<GroupSessionTeleprompter> createState() =>
+      _GroupSessionTeleprompterState();
 }
 
 class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
@@ -39,22 +77,18 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
   List<GlobalKey> _lineKeys = const [];
   bool _fetchingKalam = false;
   bool _initialized = false;
-  bool _adoptScheduled = false; // dedupes postFrame _adoptKalam calls
+  bool _adoptScheduled = false;
 
-  // ── Voice follow (host only) ────────────────────────────────────────────
-  // Streams raw 16-bit PCM over the socket to the Vosk bridge. Vosk emits
-  // partial+final transcripts in realtime; the server fuzzy-matches each
-  // against the current kalaam and broadcasts the matched line.
+  // ── Voice follow (host only) ─────────────────────────────────────────────
   AudioRecorder? _recorder;
   bool _voiceAvailable = false;
   bool _voiceMode = false;
-  bool _isStreaming = false;     // mic is open + frames are flowing
+  bool _isStreaming = false;
   bool _voiceInitAttempted = false;
   StreamSubscription<Uint8List>? _pcmSub;
   StreamSubscription<Amplitude>? _ampSub;
   final ValueNotifier<double> _soundLevel = ValueNotifier<double>(0.0);
 
-  // PCM stream config — must match what the Vosk bridge / model expects.
   static const _sampleRate = 16000;
 
   @override
@@ -78,8 +112,6 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
         });
       }
     }
-    // Pick up the latest session every time a provider notify lands so we
-    // can react to kalaam changes mid-session.
     _syncFromSession();
   }
 
@@ -102,7 +134,6 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
 
   @override
   void dispose() {
-    // Stop streaming and tear down the recorder.
     if (_voiceMode || _isStreaming) {
       _voiceMode = false;
       SocketService().emitVoiceEnd();
@@ -134,16 +165,10 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
     super.dispose();
   }
 
-  /// Pulls the latest currentKalam from SessionProvider and rebuilds the
-  /// flat-line cache only when the kalaam itself changes.
-  ///
-  /// Safe to call from `build()`: any state mutation (setState / notifier value
-  /// changes / scroll) is deferred to a post-frame callback.
   void _syncFromSession() {
     final session = context.read<SessionProvider>().session;
     if (session == null) return;
 
-    // Now that we know who the host is, try to initialize voice once.
     if (!_voiceInitAttempted) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _initVoiceIfHost();
@@ -162,10 +187,6 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
           });
         });
       }
-      // Self-heal: if the host opened a session that has a queued kalaam
-      // but no current cursor, pick the first queue item so members see
-      // content. This recovers from sessions created before the server
-      // started auto-seeding currentKalamId on session creation.
       _maybeSeedFromQueue(session);
       return;
     }
@@ -173,9 +194,6 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
     if (session.currentKalamId != _lastKalamId ||
         _kalaam == null ||
         _kalaam!.content.isEmpty) {
-      // Dedupe: between scheduling and running the postFrame callback, build()
-      // can fire many times. Without this guard each rebuild queues another
-      // _adoptKalam call and we'd pay the rebuild cost on every frame.
       if (!_adoptScheduled) {
         _lastKalamId = session.currentKalamId;
         if (session.currentKalam != null &&
@@ -193,17 +211,11 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
       }
     }
 
-    // Compute the flat-line index for the host-broadcast (stanza, line).
     final flat = _flatLineIndex(session.currentStanza, session.currentLine);
     if (_currentLine.value != flat) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         _currentLine.value = flat;
-        // ValueListenableBuilder rebuilds the per-row text styling, but if
-        // anything in the tree is shielding the rebuild (RepaintBoundary +
-        // GlobalKey'd Container around the listenable) the highlight can
-        // visually stick. Calling setState forces the ListView itself to
-        // rebuild its visible rows so the gold/normal style applies reliably.
         setState(() {});
         _scrollToCurrentLine();
       });
@@ -214,14 +226,13 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
   Future<void> _maybeSeedFromQueue(dynamic session) async {
     if (_seedingFromQueue) return;
     final auth = context.read<AuthProvider>();
-    if (session.hostId != auth.user?.id) return; // host only
+    if (session.hostId != auth.user?.id) return;
     final firstId = session.queueItems != null && session.queueItems.isNotEmpty
         ? session.queueItems.first.kalaamId
         : null;
     if (firstId == null) return;
     _seedingFromQueue = true;
     try {
-      // Prefer the realtime path; fall back to REST if socket dropped.
       final socket = SocketService();
       if (socket.isConnected) {
         socket.emitSetKalam(session.id, firstId);
@@ -229,7 +240,6 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
         await context.read<SessionProvider>().setKalam(session.id, firstId);
       }
     } catch (_) {
-      // best-effort; keeps the spinner visible if it fails
     } finally {
       _seedingFromQueue = false;
     }
@@ -239,13 +249,10 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
     if (_fetchingKalam) return;
     _fetchingKalam = true;
     try {
-      // Re-fetching the session is the cheapest way to get the populated kalaam
-      // since the server populates currentKalamId.content on GET /sessions/:id.
       final refreshed = await ApiService.getSession(sessionId);
       if (!mounted) return;
       if (refreshed.currentKalam != null) _adoptKalam(refreshed.currentKalam!);
     } catch (_) {
-      // best-effort
     } finally {
       _fetchingKalam = false;
     }
@@ -265,7 +272,7 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
     setState(() {});
   }
 
-  // ── Voice follow: PCM streaming over socket.io ─────────────────────────
+  // ── Voice follow ──────────────────────────────────────────────────────────
 
   void _toggleVoiceMode() {
     if (!_voiceAvailable) return;
@@ -282,13 +289,8 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
     if (sid == null || _recorder == null) return;
 
     final socket = SocketService();
-    // Hook up one-shot listeners for bridge readiness/errors.
-    socket.on('voice:ready', (_) {
-      debugPrint('[voice] bridge ready');
-    });
-    socket.on('voice:error', (data) {
-      debugPrint('[voice] bridge error: $data');
-    });
+    socket.on('voice:ready', (_) => debugPrint('[voice] bridge ready'));
+    socket.on('voice:error', (data) => debugPrint('[voice] bridge error: $data'));
 
     socket.emitVoiceStart(sid);
 
@@ -297,14 +299,10 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
       _ampSub = _recorder!
           .onAmplitudeChanged(const Duration(milliseconds: 150))
           .listen((amp) {
-        // amp.current is dBFS (~-160 … 0). Map to a 0..1 bar.
         final v = ((amp.current + 50) / 50).clamp(0.0, 1.0);
         _soundLevel.value = v;
       });
 
-      // Raw 16-bit little-endian mono PCM at 16 kHz — Vosk's native input
-      // format. The recorder emits frames as they're captured (typically
-      // every 20–60ms) so the bridge sees audio with near-zero buffering.
       final stream = await _recorder!.startStream(
         const RecordConfig(
           encoder: AudioEncoder.pcm16bits,
@@ -316,9 +314,7 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
       if (mounted) setState(() {});
 
       _pcmSub = stream.listen(
-        (frame) {
-          socket.emitVoiceFrame(frame);
-        },
+        (frame) => socket.emitVoiceFrame(frame),
         onError: (e) => debugPrint('[voice] pcm stream error: $e'),
         onDone: () => debugPrint('[voice] pcm stream done'),
       );
@@ -351,7 +347,6 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
       final l = _lines[i];
       if (l.stanzaIndex == stanza && l.lineIndex == line) return i;
     }
-    // Fall back to first line of the stanza if exact line out of range.
     for (int i = 0; i < _lines.length; i++) {
       if (_lines[i].stanzaIndex == stanza) return i;
     }
@@ -374,27 +369,40 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
   Future<void> _confirmAndEndSession(String sessionId) async {
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1a1a2e),
-        title: const Text('End session?',
-            style: TextStyle(color: Colors.white)),
-        content: const Text(
-          'Members will be returned to the group screen. The current queue will be saved.',
-          style: TextStyle(color: Colors.white70),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel',
-                style: TextStyle(color: Colors.white54)),
+      builder: (ctx) {
+        final palette = _Palette.of(ctx);
+        return AlertDialog(
+          backgroundColor: palette.cardBg,
+          surfaceTintColor: Colors.transparent,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: Text(
+            'End session?',
+            style: TextStyle(
+                color: palette.textPrimary, fontWeight: FontWeight.bold),
           ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('End',
-                style: TextStyle(color: Colors.redAccent)),
+          content: Text(
+            'Members will be returned to the group screen. The current queue will be saved.',
+            style: TextStyle(
+                color: palette.textSecondary, fontSize: 14, height: 1.5),
           ),
-        ],
-      ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child:
+                  Text('Cancel', style: TextStyle(color: palette.textMuted)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text(
+                'End',
+                style: TextStyle(
+                    color: Colors.redAccent, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        );
+      },
     );
     if (confirmed != true || !mounted) return;
     final nav = Navigator.of(context);
@@ -410,16 +418,14 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
     }
   }
 
-  /// Host taps a line → set current cursor and broadcast `host:setStanza`.
-  /// Voice mode (if on) keeps running; the next chunk's match will resync
-  /// the cursor automatically against the new (stanza,line) starting point.
   void _hostJumpToLine(int flatIndex) {
     final sid = _sessionId;
     if (sid == null) return;
     if (flatIndex < 0 || flatIndex >= _lines.length) return;
     HapticFeedback.selectionClick();
     _currentLine.value = flatIndex;
-    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToCurrentLine());
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _scrollToCurrentLine());
     final line = _lines[flatIndex];
     final socket = SocketService();
     if (socket.isConnected) {
@@ -433,48 +439,46 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
 
   @override
   Widget build(BuildContext context) {
-    // Sync on every rebuild so external session changes (e.g. kalamChanged)
-    // are reflected.
-    _syncFromSession();
-
     final sessionProvider = context.watch<SessionProvider>();
     final session = sessionProvider.session;
     final auth = context.read<AuthProvider>();
     final isHost = session?.hostId == auth.user?.id;
+    final palette = _Palette.of(context);
 
     return Scaffold(
-      backgroundColor: const Color(0xFF0f0f1a),
+      backgroundColor: palette.pageBg,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF1a1a2e),
+        backgroundColor: _kTeal,
+        foregroundColor: Colors.white,
+        elevation: 0,
+        surfaceTintColor: Colors.transparent,
         title: Text(
-          _kalaam?.title ?? 'Teleprompter',
+          _kalaam?.title ?? 'Session',
           overflow: TextOverflow.ellipsis,
-          style: const TextStyle(color: Colors.white, fontSize: 16),
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 17,
+            fontWeight: FontWeight.bold,
+          ),
         ),
         iconTheme: const IconThemeData(color: Colors.white),
         actions: [
           if (isHost && _voiceAvailable)
-            IconButton(
-              tooltip: _voiceMode ? 'Stop voice follow' : 'Start voice follow',
-              icon: Icon(
-                _voiceMode ? Icons.mic : Icons.mic_none_outlined,
-                color: _voiceMode ? const Color(0xFFe2b96f) : Colors.white70,
-                size: 20,
-              ),
-              onPressed: _lines.isEmpty ? null : _toggleVoiceMode,
+            _VoiceMicButton(
+              voiceMode: _voiceMode,
+              linesEmpty: _lines.isEmpty,
+              onTap: _toggleVoiceMode,
             ),
           if (isHost && (session != null || _sessionId != null))
             TextButton.icon(
-              icon: const Icon(
-                Icons.stop_circle_outlined,
-                color: Colors.redAccent,
-                size: 18,
-              ),
+              icon: const Icon(Icons.stop_circle_outlined,
+                  color: Colors.redAccent, size: 18),
               label: const Text(
                 'End',
                 style: TextStyle(color: Colors.redAccent, fontSize: 13),
               ),
-              onPressed: () => _confirmAndEndSession(session?.id ?? _sessionId!),
+              onPressed: () =>
+                  _confirmAndEndSession(session?.id ?? _sessionId!),
             ),
         ],
       ),
@@ -482,110 +486,287 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
         children: [
           _lines.isEmpty
               ? const Center(
-                  child: CircularProgressIndicator(color: Color(0xFFe2b96f)),
+                  child: CircularProgressIndicator(
+                    color: _kTeal,
+                    strokeWidth: 2,
+                  ),
                 )
               : ListView.builder(
                   controller: _scroll,
-                  padding:
-                      const EdgeInsets.symmetric(vertical: 60, horizontal: 24),
+                  padding: const EdgeInsets.symmetric(
+                      vertical: 80, horizontal: 20),
                   cacheExtent: 2400,
                   itemCount: _lines.length,
-                  itemBuilder: (_, i) => _GroupLineView(
-                    lineKey: _lineKeys[i],
-                    index: i,
-                    text: _lines[i].text,
-                    isCurrent: _currentLine.value == i,
-                    onTap: isHost ? () => _hostJumpToLine(i) : null,
-                  ),
-                ),
-          if (isHost && _voiceMode)
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: IgnorePointer(
-                child: Container(
-                  padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
-                  decoration: const BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.bottomCenter,
-                      end: Alignment.topCenter,
-                      colors: [Color(0xEE0a0a14), Colors.transparent],
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        _isStreaming ? Icons.mic : Icons.mic_off,
-                        color: _isStreaming
-                            ? const Color(0xFFe2b96f)
-                            : Colors.white38,
-                        size: 16,
-                      ),
-                      const SizedBox(width: 8),
-                      SizedBox(
-                        width: 100,
-                        height: 4,
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(2),
-                          child: ValueListenableBuilder<double>(
-                            valueListenable: _soundLevel,
-                            builder: (_, level, _) => LinearProgressIndicator(
-                              value: level,
-                              backgroundColor: Colors.white12,
-                              color: const Color(0xFFe2b96f),
-                            ),
-                          ),
+                  itemBuilder: (_, i) {
+                    final line = _lines[i];
+                    final showSep = i > 0 &&
+                        _lines[i - 1].stanzaIndex != line.stanzaIndex;
+                    return Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (showSep)
+                          _StanzaSeparator(dotColor: palette.separatorDot),
+                        _GroupLineView(
+                          lineKey: _lineKeys[i],
+                          index: i,
+                          text: line.text,
+                          isCurrent: _currentLine.value == i,
+                          dimColor: palette.lineDim,
+                          onTap: isHost ? () => _hostJumpToLine(i) : null,
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        _isStreaming
-                            ? 'Voice follow · listening'
-                            : 'Voice follow',
-                        style: const TextStyle(
-                            color: Colors.white54, fontSize: 11),
-                      ),
-                    ],
+                      ],
+                    );
+                  },
+                ),
+          // Top fade softens the list edge under the AppBar.
+          Positioned(
+            left: 0,
+            right: 0,
+            top: 0,
+            child: IgnorePointer(
+              child: Container(
+                height: 80,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [palette.pageBg, palette.pageBg.withValues(alpha: 0)],
                   ),
                 ),
               ),
             ),
+          ),
+          if (isHost && _voiceMode)
+            _VoiceOverlay(
+              isStreaming: _isStreaming,
+              soundLevel: _soundLevel,
+              overlayColor: palette.overlayGradientOpaque,
+              isDark: palette.isDark,
+            ),
         ],
       ),
       bottomNavigationBar: isHost && session != null
-          ? SafeArea(
-              top: false,
-              child: Container(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-                decoration: const BoxDecoration(
-                  color: Color(0xFF1a1a2e),
-                  border: Border(top: BorderSide(color: Colors.white12)),
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFFe2b96f),
-                          foregroundColor: Colors.black,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(10)),
-                        ),
-                        icon: const Icon(Icons.skip_next_rounded),
-                        label: const Text('Done — Next'),
-                        onPressed: () => context
-                            .read<SessionProvider>()
-                            .advanceToNext(session.id),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+          ? _BottomBar(
+              palette: palette,
+              onAdvance: () => context
+                  .read<SessionProvider>()
+                  .advanceToNext(session.id),
             )
           : null,
+    );
+  }
+}
+
+// ─── Voice mic AppBar button ──────────────────────────────────────────────────
+
+class _VoiceMicButton extends StatelessWidget {
+  final bool voiceMode;
+  final bool linesEmpty;
+  final VoidCallback onTap;
+
+  const _VoiceMicButton({
+    required this.voiceMode,
+    required this.linesEmpty,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 4),
+      child: IconButton(
+        tooltip: voiceMode ? 'Stop voice follow' : 'Start voice follow',
+        icon: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 200),
+          child: Icon(
+            voiceMode ? Icons.mic_rounded : Icons.mic_none_outlined,
+            key: ValueKey(voiceMode),
+            color: voiceMode
+                ? _kOrange
+                : Colors.white.withValues(alpha: 0.7),
+            size: 22,
+          ),
+        ),
+        onPressed: linesEmpty ? null : onTap,
+      ),
+    );
+  }
+}
+
+// ─── Voice status overlay ─────────────────────────────────────────────────────
+
+class _VoiceOverlay extends StatelessWidget {
+  final bool isStreaming;
+  final ValueNotifier<double> soundLevel;
+  final Color overlayColor;
+  final bool isDark;
+
+  const _VoiceOverlay({
+    required this.isStreaming,
+    required this.soundLevel,
+    required this.overlayColor,
+    required this.isDark,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final mutedColor = isDark
+        ? Colors.white.withValues(alpha: 0.3)
+        : Colors.black.withValues(alpha: 0.3);
+    final labelColor = isDark
+        ? Colors.white.withValues(alpha: 0.45)
+        : Colors.black.withValues(alpha: 0.45);
+
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
+      child: IgnorePointer(
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(24, 32, 24, 20),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.bottomCenter,
+              end: Alignment.topCenter,
+              colors: [overlayColor, overlayColor.withValues(alpha: 0)],
+            ),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                isStreaming ? Icons.mic_rounded : Icons.mic_off_rounded,
+                color: isStreaming ? _kOrange : mutedColor,
+                size: 15,
+              ),
+              const SizedBox(width: 10),
+              SizedBox(
+                width: 90,
+                height: 3,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(2),
+                  child: ValueListenableBuilder<double>(
+                    valueListenable: soundLevel,
+                    builder: (_, level, _) => LinearProgressIndicator(
+                      value: level,
+                      backgroundColor: isDark
+                          ? Colors.white.withValues(alpha: 0.10)
+                          : Colors.black.withValues(alpha: 0.10),
+                      valueColor:
+                          const AlwaysStoppedAnimation<Color>(_kOrange),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                isStreaming ? 'Voice follow · listening' : 'Voice follow',
+                style: TextStyle(
+                  color: labelColor,
+                  fontSize: 11,
+                  letterSpacing: 0.2,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Bottom bar ───────────────────────────────────────────────────────────────
+
+class _BottomBar extends StatefulWidget {
+  final _Palette palette;
+  final VoidCallback onAdvance;
+  const _BottomBar({required this.palette, required this.onAdvance});
+
+  @override
+  State<_BottomBar> createState() => _BottomBarState();
+}
+
+class _BottomBarState extends State<_BottomBar> {
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      top: false,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
+        decoration: BoxDecoration(
+          color: widget.palette.bottomBarBg,
+          border: Border(
+            top: BorderSide(color: widget.palette.bottomBarBorder),
+          ),
+        ),
+        child: GestureDetector(
+          onTap: widget.onAdvance,
+          onTapDown: (_) => setState(() => _pressed = true),
+          onTapUp: (_) => setState(() => _pressed = false),
+          onTapCancel: () => setState(() => _pressed = false),
+          child: AnimatedScale(
+            scale: _pressed ? 0.97 : 1.0,
+            duration: const Duration(milliseconds: 100),
+            curve: Curves.easeOut,
+            child: Container(
+              height: 52,
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  begin: Alignment.centerLeft,
+                  end: Alignment.centerRight,
+                  colors: [_kOrange, _kOrangeGrad2],
+                ),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.skip_next_rounded, color: Colors.white, size: 20),
+                  SizedBox(width: 6),
+                  Text(
+                    'Done — Next',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 15,
+                      letterSpacing: -0.2,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Data + line widget ───────────────────────────────────────────────────────
+
+class _StanzaSeparator extends StatelessWidget {
+  final Color dotColor;
+  const _StanzaSeparator({required this.dotColor});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          for (int i = 0; i < 3; i++) ...[
+            if (i > 0) const SizedBox(width: 5),
+            Container(
+              width: 4,
+              height: 4,
+              decoration: BoxDecoration(color: dotColor, shape: BoxShape.circle),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }
@@ -606,6 +787,7 @@ class _GroupLineView extends StatelessWidget {
   final int index;
   final String text;
   final bool isCurrent;
+  final Color dimColor;
   final VoidCallback? onTap;
 
   const _GroupLineView({
@@ -613,6 +795,7 @@ class _GroupLineView extends StatelessWidget {
     required this.index,
     required this.text,
     required this.isCurrent,
+    required this.dimColor,
     required this.onTap,
   });
 
@@ -621,17 +804,24 @@ class _GroupLineView extends StatelessWidget {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
-      child: Container(
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
         key: lineKey,
-        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
+        margin: const EdgeInsets.symmetric(vertical: 2),
+        padding: EdgeInsets.symmetric(
+          vertical: isCurrent ? 14 : 10,
+          horizontal: 12,
+        ),
         child: Text(
           text,
           textAlign: TextAlign.center,
           style: TextStyle(
-            color: isCurrent ? const Color(0xFFe2b96f) : Colors.white54,
-            fontSize: isCurrent ? 20 : 17,
+            color: isCurrent ? _kOrange : dimColor,
+            fontSize: isCurrent ? 23 : 17,
             fontWeight: isCurrent ? FontWeight.bold : FontWeight.w400,
-            height: 1.7,
+            height: 1.75,
+            letterSpacing: isCurrent ? 0.2 : 0,
           ),
         ),
       ),

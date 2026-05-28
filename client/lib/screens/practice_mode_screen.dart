@@ -1,13 +1,19 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:record/record.dart';
 
 import '../models/kalaam_model.dart';
+import '../providers/listen_session_provider.dart';
 import '../providers/practice_provider.dart';
+import '../services/reference_audio_service.dart';
+import '../services/socket_service.dart';
 
 // ───────────────────────────────────────────────────────────────────────────
 // Design tokens (mirrors home_screen.dart)
@@ -100,15 +106,35 @@ class _PracticeModeScreenState extends State<PracticeModeScreen>
   // 'solo' when no mode is supplied via route arguments.
   String _mode = 'solo';
 
-  // ── New visual-only animation state ─────────────────────────────────────
+  // ── Visual animation state ────────────────────────────────────────────────
   final DraggableScrollableController _sheetController =
       DraggableScrollableController();
   late final AnimationController _heroEntryController;
   late final AnimationController _glyphEntryController;
   late final AnimationController _diamondSpinController;
-  late final AnimationController _playheadController;
+
+  // ── Audio playback state ─────────────────────────────────────────────────
+  AudioPlayer? _audioPlayer;
+  bool _hasAudio = false;
+  Duration _audioPosition = Duration.zero;
+  Duration _audioDuration = Duration.zero;
 
   double _sheetSize = 0.62;
+
+  // ── Follow-my-voice STT state (mode == 'follow') ─────────────────────────
+  // Same protocol as the group teleprompter: AudioRecorder pushes 16 kHz
+  // mono PCM frames to the server over socket.io. The server runs Vosk and
+  // emits `voice:soloStanzaChanged` back to this socket as the matcher
+  // confidently advances the cursor.
+  AudioRecorder? _voiceRecorder;
+  bool _voiceAvailable = false;
+  bool _voiceMode = false;
+  bool _isStreaming = false;
+  bool _voiceInitAttempted = false;
+  StreamSubscription<Uint8List>? _pcmSub;
+  StreamSubscription<Amplitude>? _ampSub;
+  final ValueNotifier<double> _soundLevel = ValueNotifier<double>(0.0);
+  static const int _voiceSampleRate = 16000;
 
   @override
   void initState() {
@@ -127,11 +153,6 @@ class _PracticeModeScreenState extends State<PracticeModeScreen>
       vsync: this,
       duration: const Duration(seconds: 12),
     )..repeat();
-    _playheadController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 90),
-    );
-
     _sheetScrollController = ScrollController();
     _sheetController.addListener(_onSheetSizeChanged);
 
@@ -172,6 +193,8 @@ class _PracticeModeScreenState extends State<PracticeModeScreen>
     }
 
     _restoreProgress();
+    _loadReferenceAudio();
+    if (_mode == 'follow') _initVoice();
 
     // Animate the sheet in from a slightly smaller resting size to its
     // initial `0.62` height. The DraggableScrollableSheet itself starts at
@@ -187,6 +210,64 @@ class _PracticeModeScreenState extends State<PracticeModeScreen>
       } catch (_) {
         // Controller may not be attached yet on cold frames; ignore.
       }
+    });
+  }
+
+  Future<void> _loadReferenceAudio() async {
+    // 1. Prefer the locally-cached file (zero latency).
+    var ref = await ReferenceAudioService.instance.getReference(_kalaam.id);
+    var file = ref != null ? File(ref.localWavPath) : null;
+
+    // 2. If the device hasn't seen this kalaam before but the server has a
+    //    reference attached, pull it down into the cache and try again. This
+    //    is what makes follow-voice work on a second device — without this
+    //    step the timeline would never appear because the reference only
+    //    existed on the uploader's device.
+    final serverMedia = _kalaam.referenceAudio;
+    if ((file == null || !await file.exists()) && serverMedia != null) {
+      final ok = await ReferenceAudioService.instance.ensureLocalCopy(
+        kalaamId: _kalaam.id,
+        media: serverMedia,
+      );
+      if (!ok || !mounted) return;
+      ref = await ReferenceAudioService.instance.getReference(_kalaam.id);
+      file = ref != null ? File(ref.localWavPath) : null;
+    }
+
+    if (ref == null || file == null || !await file.exists()) {
+      debugPrint('[ref-audio] no playable file for kalaam ${_kalaam.id}');
+      return;
+    }
+
+    final player = AudioPlayer();
+    try {
+      await player.setSource(DeviceFileSource(file.path));
+    } catch (e) {
+      // Silent failures here were the symptom behind the audio-upload bug —
+      // a wrongly-named file path made the native decoder reject the source
+      // and the timeline never appeared. Log so future regressions surface.
+      debugPrint('[ref-audio] setSource failed for ${file.path}: $e');
+      await player.dispose();
+      return;
+    }
+    if (!mounted) {
+      await player.dispose();
+      return;
+    }
+
+    player.onPositionChanged.listen((pos) {
+      if (mounted) setState(() => _audioPosition = pos);
+    });
+    player.onDurationChanged.listen((dur) {
+      if (mounted) setState(() => _audioDuration = dur);
+    });
+    player.onPlayerStateChanged.listen((state) {
+      if (mounted) setState(() => _isPlaying = state == PlayerState.playing);
+    });
+
+    setState(() {
+      _audioPlayer = player;
+      _hasAudio = true;
     });
   }
 
@@ -211,10 +292,147 @@ class _PracticeModeScreenState extends State<PracticeModeScreen>
     _heroEntryController.dispose();
     _glyphEntryController.dispose();
     _diamondSpinController.dispose();
-    _playheadController.dispose();
     _sheetScrollController.dispose();
+    _audioPlayer?.dispose();
+    if (_voiceMode || _isStreaming) {
+      _voiceMode = false;
+      SocketService().emitVoiceEnd();
+      _voiceRecorder?.stop().catchError((_) => null);
+    }
+    _pcmSub?.cancel();
+    _ampSub?.cancel();
+    _voiceRecorder?.dispose();
+    SocketService().off('voice:soloStanzaChanged');
+    SocketService().off('voice:ready');
+    SocketService().off('voice:error');
+    _soundLevel.dispose();
     _saveFinalProgress();
     super.dispose();
+  }
+
+  // ── Follow-my-voice control ─────────────────────────────────────────────
+
+  Future<void> _initVoice() async {
+    if (_voiceInitAttempted) return;
+    _voiceInitAttempted = true;
+    try {
+      _voiceRecorder = AudioRecorder();
+      _voiceAvailable = await _voiceRecorder!.hasPermission();
+    } catch (e) {
+      debugPrint('[follow-voice] recorder init failed: $e');
+      _voiceAvailable = false;
+    }
+    // Make sure the socket is connected before we register listeners — the
+    // group teleprompter relies on existing session traffic to keep it open,
+    // but solo practice has no such guarantee.
+    try {
+      await SocketService().connect();
+    } catch (e) {
+      debugPrint('[follow-voice] socket connect failed: $e');
+    }
+    SocketService().on('voice:ready', (_) {
+      debugPrint('[follow-voice] bridge ready');
+    });
+    SocketService().on('voice:error', (data) {
+      debugPrint('[follow-voice] bridge error: $data');
+    });
+    SocketService().on('voice:soloStanzaChanged', _onSoloStanzaChanged);
+    if (mounted) setState(() {});
+  }
+
+  void _onSoloStanzaChanged(dynamic data) {
+    if (data is! Map) return;
+    final stanza = _asInt(data['stanza']);
+    final line = _asInt(data['line']);
+    if (stanza == null || line == null) return;
+    final flat = _lines.indexWhere(
+      (l) => l.stanzaIndex == stanza && l.lineIndex == line,
+    );
+    if (flat < 0) return;
+    if (_currentLineIndex == flat) return;
+    if (!mounted) return;
+    setState(() => _currentLineIndex = flat);
+    _persistProgress(completed: false);
+    _scrollToCurrentLine();
+  }
+
+  static int? _asInt(dynamic v) {
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    if (v is String) return int.tryParse(v);
+    return null;
+  }
+
+  Future<void> _toggleVoiceFollow() async {
+    if (!_voiceAvailable) {
+      // Permission was previously denied — re-request so the user can
+      // approve from a settings detour without restarting the screen.
+      try {
+        _voiceAvailable = await (_voiceRecorder?.hasPermission() ??
+            Future.value(false));
+      } catch (_) {
+        _voiceAvailable = false;
+      }
+      if (!_voiceAvailable) return;
+    }
+    if (_voiceMode) {
+      await _stopVoiceFollow();
+    } else {
+      setState(() => _voiceMode = true);
+      await _startVoiceFollow();
+    }
+  }
+
+  Future<void> _startVoiceFollow() async {
+    final recorder = _voiceRecorder;
+    if (recorder == null) return;
+    final socket = SocketService();
+    socket.emitVoiceSoloStart(_kalaam.id);
+    try {
+      _ampSub?.cancel();
+      _ampSub = recorder
+          .onAmplitudeChanged(const Duration(milliseconds: 150))
+          .listen((amp) {
+        final v = ((amp.current + 50) / 50).clamp(0.0, 1.0);
+        _soundLevel.value = v;
+      });
+
+      final stream = await recorder.startStream(
+        const RecordConfig(
+          encoder: AudioEncoder.pcm16bits,
+          sampleRate: _voiceSampleRate,
+          numChannels: 1,
+        ),
+      );
+      _isStreaming = true;
+      if (mounted) setState(() {});
+
+      _pcmSub = stream.listen(
+        (frame) => socket.emitVoiceFrame(frame),
+        onError: (e) => debugPrint('[follow-voice] pcm stream error: $e'),
+        onDone: () => debugPrint('[follow-voice] pcm stream done'),
+      );
+    } catch (e) {
+      debugPrint('[follow-voice] start failed: $e');
+      _voiceMode = false;
+      if (mounted) setState(() {});
+    }
+  }
+
+  Future<void> _stopVoiceFollow() async {
+    _voiceMode = false;
+    try {
+      if (await (_voiceRecorder?.isRecording() ?? Future.value(false))) {
+        await _voiceRecorder!.stop();
+      }
+    } catch (_) {}
+    await _pcmSub?.cancel();
+    _pcmSub = null;
+    _ampSub?.cancel();
+    _ampSub = null;
+    SocketService().emitVoiceEnd();
+    _soundLevel.value = 0.0;
+    if (mounted) setState(() => _isStreaming = false);
   }
 
   // ── Lines ──────────────────────────────────────────────────────────────
@@ -275,11 +493,11 @@ class _PracticeModeScreenState extends State<PracticeModeScreen>
   }
 
   void _togglePlayPause() {
-    setState(() => _isPlaying = !_isPlaying);
+    if (_audioPlayer == null) return;
     if (_isPlaying) {
-      _playheadController.repeat();
+      _audioPlayer!.pause();
     } else {
-      _playheadController.stop();
+      _audioPlayer!.resume();
     }
   }
 
@@ -423,15 +641,8 @@ class _PracticeModeScreenState extends State<PracticeModeScreen>
                           },
                         ),
                       ),
-                      SliverToBoxAdapter(
-                        child: _WaveformBlock(
-                          seed: _kalaam.id.hashCode,
-                          playhead: _playheadController,
-                          isPlaying: _isPlaying,
-                        ),
-                      ),
                       const SliverToBoxAdapter(
-                        child: SizedBox(height: 120),
+                        child: SizedBox(height: 200),
                       ),
                     ],
                   ),
@@ -439,19 +650,53 @@ class _PracticeModeScreenState extends State<PracticeModeScreen>
               },
             ),
 
-            // ── Bottom action bar ─────────────────────────────────────────
+            // ── Bottom action bar + timeline ──────────────────────────────
             Positioned(
               left: 16,
               right: 16,
               bottom: media.padding.bottom + 12,
-              child: _BottomActionBar(
-                isPlaying: _isPlaying,
-                onBack: () => Navigator.of(context).maybePop(),
-                onPrev: _prevLine,
-                onNext: _nextLine,
-                onPlayPause: _togglePlayPause,
-              ),
+              child: _mode == 'listen'
+                  ? _ListenBottomBar(kalaam: _kalaam)
+                  : Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (_hasAudio) ...[
+                          _TimelineBar(
+                            position: _audioPosition,
+                            duration: _audioDuration,
+                            onSeek: (pos) => _audioPlayer?.seek(pos),
+                          ),
+                          const SizedBox(height: 8),
+                        ],
+                        _BottomActionBar(
+                          isPlaying: _isPlaying,
+                          hasAudio: _hasAudio,
+                          onBack: () => Navigator.of(context).maybePop(),
+                          onPrev: _prevLine,
+                          onNext: _nextLine,
+                          onPlayPause: _togglePlayPause,
+                        ),
+                      ],
+                    ),
             ),
+
+            // ── Top "AppBar" overlay (Follow mode) ────────────────────────
+            // Floats over the teal hero so the existing layout doesn't
+            // collapse. Hosts the back button + voice-follow mic toggle.
+            if (_mode == 'follow')
+              Positioned(
+                top: media.padding.top + 4,
+                left: 4,
+                right: 4,
+                child: _FollowVoiceAppBar(
+                  voiceAvailable: _voiceAvailable,
+                  voiceMode: _voiceMode,
+                  isStreaming: _isStreaming,
+                  soundLevel: _soundLevel,
+                  onBack: () => Navigator.of(context).maybePop(),
+                  onToggleVoice: _toggleVoiceFollow,
+                ),
+              ),
           ],
         ),
       ),
@@ -843,42 +1088,82 @@ class _StanzaDivider extends StatelessWidget {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Waveform
+// Timeline bar (attached to bottom nav)
 // ───────────────────────────────────────────────────────────────────────────
 
-class _WaveformBlock extends StatelessWidget {
-  final int seed;
-  final AnimationController playhead;
-  final bool isPlaying;
-  const _WaveformBlock({
-    required this.seed,
-    required this.playhead,
-    required this.isPlaying,
+class _TimelineBar extends StatelessWidget {
+  final Duration position;
+  final Duration duration;
+  final ValueChanged<Duration> onSeek;
+
+  const _TimelineBar({
+    required this.position,
+    required this.duration,
+    required this.onSeek,
   });
+
+  String _fmt(Duration d) {
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
+    final progress = duration.inMilliseconds > 0
+        ? (position.inMilliseconds / duration.inMilliseconds).clamp(0.0, 1.0)
+        : 0.0;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.07),
+            blurRadius: 14,
+            offset: const Offset(0, -2),
+          ),
+        ],
+      ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 4),
+          SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: 3,
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+              overlayShape: SliderComponentShape.noOverlay,
+              activeTrackColor: _kTeal,
+              inactiveTrackColor: _kWaveInactive,
+              thumbColor: _kOrange,
+            ),
+            child: Slider(
+              value: progress.toDouble(),
+              onChanged: (v) => onSeek(
+                Duration(
+                    milliseconds:
+                        (v * duration.inMilliseconds).round()),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(6, 0, 6, 4),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text(
-                  '00:03',
-                  style: TextStyle(
+                  _fmt(position),
+                  style: const TextStyle(
                     fontSize: 11,
                     color: _kInkMuted,
                     fontWeight: FontWeight.w500,
                   ),
                 ),
                 Text(
-                  '01:30',
-                  style: TextStyle(
+                  _fmt(duration),
+                  style: const TextStyle(
                     fontSize: 11,
                     color: _kInkMuted,
                     fontWeight: FontWeight.w500,
@@ -887,69 +1172,10 @@ class _WaveformBlock extends StatelessWidget {
               ],
             ),
           ),
-          const SizedBox(height: 6),
-          SizedBox(
-            height: 38,
-            child: AnimatedBuilder(
-              animation: playhead,
-              builder: (context, _) {
-                return CustomPaint(
-                  size: Size.infinite,
-                  painter: _WaveformPainter(
-                    seed: seed,
-                    progress: playhead.value,
-                  ),
-                );
-              },
-            ),
-          ),
         ],
       ),
     );
   }
-}
-
-class _WaveformPainter extends CustomPainter {
-  final int seed;
-  final double progress;
-  static const int barCount = 44;
-
-  _WaveformPainter({required this.seed, required this.progress});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final rng = math.Random(seed);
-    final heights = List<double>.generate(
-      barCount,
-      (_) => 0.18 + rng.nextDouble() * 0.82,
-    );
-
-    final slot = size.width / barCount;
-    final barWidth = math.max(1.5, slot * 0.45);
-    final activePaint = Paint()..color = _kTeal;
-    final inactivePaint = Paint()..color = _kWaveInactive;
-
-    final playheadX = size.width * progress;
-
-    for (int i = 0; i < barCount; i++) {
-      final h = heights[i] * size.height;
-      final centerX = slot * i + slot / 2;
-      final left = centerX - barWidth / 2;
-      final top = (size.height - h) / 2;
-      final rect = RRect.fromRectAndRadius(
-        Rect.fromLTWH(left, top, barWidth, h),
-        const Radius.circular(1.5),
-      );
-      canvas.drawRRect(
-        rect,
-        centerX <= playheadX ? activePaint : inactivePaint,
-      );
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _WaveformPainter old) =>
-      old.progress != progress || old.seed != seed;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -958,6 +1184,7 @@ class _WaveformPainter extends CustomPainter {
 
 class _BottomActionBar extends StatelessWidget {
   final bool isPlaying;
+  final bool hasAudio;
   final VoidCallback onBack;
   final VoidCallback onPrev;
   final VoidCallback onNext;
@@ -965,6 +1192,7 @@ class _BottomActionBar extends StatelessWidget {
 
   const _BottomActionBar({
     required this.isPlaying,
+    required this.hasAudio,
     required this.onBack,
     required this.onPrev,
     required this.onNext,
@@ -1026,7 +1254,7 @@ class _BottomActionBar extends StatelessWidget {
                   onTap: onPrev,
                 ),
                 GestureDetector(
-                  onTap: onPlayPause,
+                  onTap: hasAudio ? onPlayPause : null,
                   behavior: HitTestBehavior.opaque,
                   child: SizedBox(
                     width: 56,
@@ -1039,11 +1267,19 @@ class _BottomActionBar extends StatelessWidget {
                           child: child,
                         ),
                         child: Icon(
-                          isPlaying
-                              ? Icons.pause_rounded
-                              : Icons.play_arrow_rounded,
-                          key: ValueKey(isPlaying),
-                          color: Colors.white,
+                          !hasAudio
+                              ? Icons.music_note_rounded
+                              : isPlaying
+                                  ? Icons.pause_rounded
+                                  : Icons.play_arrow_rounded,
+                          key: ValueKey(!hasAudio
+                              ? 'no_audio'
+                              : isPlaying
+                                  ? 'pause'
+                                  : 'play'),
+                          color: hasAudio
+                              ? Colors.white
+                              : Colors.white.withValues(alpha: 0.35),
                           size: 32,
                         ),
                       ),
@@ -1077,6 +1313,256 @@ class _CapsuleIconButton extends StatelessWidget {
         width: 56,
         height: 56,
         child: Icon(icon, color: Colors.white, size: 28),
+      ),
+    );
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Listen mode bottom bar
+// ───────────────────────────────────────────────────────────────────────────
+
+class _ListenBottomBar extends StatefulWidget {
+  final KalaamModel kalaam;
+  const _ListenBottomBar({required this.kalaam});
+
+  @override
+  State<_ListenBottomBar> createState() => _ListenBottomBarState();
+}
+
+class _ListenBottomBarState extends State<_ListenBottomBar> {
+  bool _navigating = false;
+
+  Future<void> _onMicTap(ListenSessionProvider provider) async {
+    if (provider.state == ListenSessionState.idle ||
+        provider.state == ListenSessionState.error) {
+      await provider.startListening(widget.kalaam);
+    } else if (provider.state == ListenSessionState.recording) {
+      await provider.stopAndScore();
+    }
+  }
+
+  Future<void> _onDoneTap(ListenSessionProvider provider) async {
+    if (provider.state == ListenSessionState.recording) {
+      await provider.stopAndScore();
+    } else if (provider.state == ListenSessionState.scored) {
+      _navigateToResults(provider);
+    }
+  }
+
+  void _navigateToResults(ListenSessionProvider provider) {
+    if (_navigating) return;
+    _navigating = true;
+    Navigator.pushNamed(
+      context,
+      '/practice-results',
+      arguments: {
+        'score': provider.latestScore,
+        'kalaam': widget.kalaam,
+        'feedback': provider.latestFeedback,
+      },
+    ).then((_) {
+      if (mounted) {
+        setState(() => _navigating = false);
+        provider.reset();
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = context.watch<ListenSessionProvider>();
+    final state = provider.state;
+
+    // Auto-navigate when scoring completes.
+    if (state == ListenSessionState.scored && !_navigating) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _navigateToResults(provider);
+      });
+    }
+
+    final isRecording = state == ListenSessionState.recording;
+    final isProcessing = state == ListenSessionState.processing;
+    final doneEnabled = isRecording || state == ListenSessionState.scored;
+
+    return Row(
+      children: [
+        // Back
+        GestureDetector(
+          onTap: () => Navigator.of(context).maybePop(),
+          child: Container(
+            height: 44,
+            width: 72,
+            decoration: BoxDecoration(
+              color: _kSurfaceMuted,
+              borderRadius: BorderRadius.circular(40),
+            ),
+            alignment: Alignment.center,
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.arrow_back_rounded, size: 16, color: _kInkPrimary),
+                SizedBox(width: 4),
+                Text('Back',
+                    style: TextStyle(
+                        fontSize: 13,
+                        color: _kInkPrimary,
+                        fontWeight: FontWeight.w500)),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+
+        // Mic / Stop / Spinner
+        Expanded(
+          child: GestureDetector(
+            onTap: isProcessing ? null : () => _onMicTap(provider),
+            child: Container(
+              height: 64,
+              decoration: BoxDecoration(
+                color: isRecording ? const Color(0xFFDC2626) : _kTeal,
+                borderRadius: BorderRadius.circular(40),
+                boxShadow: [
+                  BoxShadow(
+                    color: (isRecording ? const Color(0xFFDC2626) : _kTeal)
+                        .withValues(alpha: 0.28),
+                    blurRadius: 14,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              alignment: Alignment.center,
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 200),
+                transitionBuilder: (child, anim) =>
+                    ScaleTransition(scale: anim, child: child),
+                child: isProcessing
+                    ? const SizedBox(
+                        key: ValueKey('loading'),
+                        width: 26,
+                        height: 26,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2.5, color: Colors.white),
+                      )
+                    : Icon(
+                        isRecording ? Icons.stop_rounded : Icons.mic_rounded,
+                        key: ValueKey(isRecording ? 'stop' : 'mic'),
+                        color: Colors.white,
+                        size: 32,
+                      ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+
+        // Done
+        GestureDetector(
+          onTap: doneEnabled && !isProcessing ? () => _onDoneTap(provider) : null,
+          child: AnimatedOpacity(
+            duration: const Duration(milliseconds: 180),
+            opacity: doneEnabled ? 1.0 : 0.35,
+            child: Container(
+              height: 44,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              decoration: BoxDecoration(
+                color: _kOrange,
+                borderRadius: BorderRadius.circular(40),
+              ),
+              alignment: Alignment.center,
+              child: const Text(
+                'Done',
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Colors.white,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Follow-my-voice AppBar overlay (mode == 'follow')
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Floating "AppBar" rendered over the teal hero. The hero already provides
+/// the background colour, so we draw transparent icon buttons on top instead
+/// of stacking a real Material AppBar (which would push the hero down).
+class _FollowVoiceAppBar extends StatelessWidget {
+  final bool voiceAvailable;
+  final bool voiceMode;
+  final bool isStreaming;
+  final ValueNotifier<double> soundLevel;
+  final VoidCallback onBack;
+  final VoidCallback onToggleVoice;
+
+  const _FollowVoiceAppBar({
+    required this.voiceAvailable,
+    required this.voiceMode,
+    required this.isStreaming,
+    required this.soundLevel,
+    required this.onBack,
+    required this.onToggleVoice,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: Row(
+        children: [
+          IconButton(
+            icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
+            tooltip: 'Back',
+            onPressed: onBack,
+          ),
+          const Spacer(),
+          if (voiceMode && isStreaming)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: SizedBox(
+                width: 60,
+                height: 3,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(2),
+                  child: ValueListenableBuilder<double>(
+                    valueListenable: soundLevel,
+                    builder: (_, level, _) => LinearProgressIndicator(
+                      value: level,
+                      backgroundColor: Colors.white.withValues(alpha: 0.18),
+                      valueColor: const AlwaysStoppedAnimation<Color>(
+                          _kOrange),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          IconButton(
+            tooltip: voiceMode
+                ? 'Stop voice follow'
+                : voiceAvailable
+                    ? 'Start voice follow'
+                    : 'Microphone unavailable',
+            icon: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 200),
+              child: Icon(
+                voiceMode ? Icons.mic_rounded : Icons.mic_none_outlined,
+                key: ValueKey(voiceMode),
+                color: voiceMode
+                    ? _kOrange
+                    : Colors.white.withValues(alpha: voiceAvailable ? 0.9 : 0.4),
+                size: 24,
+              ),
+            ),
+            onPressed: voiceAvailable ? onToggleVoice : null,
+          ),
+        ],
       ),
     );
   }

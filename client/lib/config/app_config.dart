@@ -1,5 +1,15 @@
 import 'package:shared_preferences/shared_preferences.dart';
 
+/// Build-time flag flipping the app into "beta" mode. Surfaces a small
+/// BETA pill on the splash + home header so testers know they are on a
+/// pre-release build. Flip to `false` for the stable launch.
+const bool kIsBeta = true;
+
+/// Human-readable version shown alongside the BETA pill. Keep in sync
+/// with `version:` in pubspec.yaml — that's the source of truth at
+/// build time; this constant is only for display.
+const String kAppVersionLabel = '1.0.0-beta.1';
+
 /// Holds the server base URL.
 ///
 /// Resolution order (first match wins):
@@ -15,7 +25,7 @@ class AppConfig {
   static const String _envBaseUrl = String.fromEnvironment(
     'BASE_URL',
     defaultValue:
-        'https://recovery-packed-mother-pty.trycloudflare.com',
+        'https://squad-tissue-notify-massive.trycloudflare.com',
   );
 
   static String? _override;

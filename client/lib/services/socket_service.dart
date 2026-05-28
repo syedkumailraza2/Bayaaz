@@ -117,6 +117,15 @@ class SocketService {
   void leaveGroup(String groupId) =>
       _socket?.emit('group:leave', {'groupId': groupId});
 
+  // Per-kalaam engagement room. The detail screen joins on open and leaves
+  // on dispose so its like / save / view counters update live from
+  // `kalaam:engagement` broadcasts emitted whenever any user interacts.
+  void joinKalaam(String kalaamId) =>
+      _socket?.emit('kalaam:join', {'kalaamId': kalaamId});
+
+  void leaveKalaam(String kalaamId) =>
+      _socket?.emit('kalaam:leave', {'kalaamId': kalaamId});
+
   // Host emitters
   void emitSetKalam(String sessionId, String kalamId) =>
       _socket?.emit('host:setKalam', {'sessionId': sessionId, 'kalamId': kalamId});
@@ -170,6 +179,12 @@ class SocketService {
   // Vosk and broadcasts `session:stanzaChanged` as the cursor moves.
   void emitVoiceStart(String sessionId) =>
       _socket?.emit('voice:start', {'sessionId': sessionId});
+
+  // Solo (no session) follow-my-voice. Same PCM transport, but the server
+  // emits `voice:soloStanzaChanged` back to this socket only — used by the
+  // single-user practice teleprompter.
+  void emitVoiceSoloStart(String kalaamId) =>
+      _socket?.emit('voice:soloStart', {'kalaamId': kalaamId});
 
   void emitVoiceFrame(List<int> pcm) =>
       _socket?.emit('voice:frame', pcm);

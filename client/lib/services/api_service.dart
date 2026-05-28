@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'dart:io';
+
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../config/app_config.dart';
@@ -179,11 +181,102 @@ class ApiService {
     throw Exception(_parseBody(res)['message'] ?? 'Failed to like kalaam');
   }
 
+  /// Uploads the local reference recitation for a kalaam to the server. The
+  /// returned [KalaamModel] now has its `referenceAudio` field populated;
+  /// callers can patch the in-memory list so other devices see it next
+  /// time they refresh.
+  static Future<KalaamModel> uploadReferenceAudio({
+    required String kalaamId,
+    required File audio,
+    required String sourceType,
+    String? sourceUrl,
+    int? durationMs,
+    String? extension,
+  }) async {
+    final uri = Uri.parse('$kBaseUrl/kalaams/$kalaamId/reference');
+    final headers = await _authHeaders();
+    headers.remove('Content-Type'); // multipart sets its own boundary
+    final req = http.MultipartRequest('POST', uri)
+      ..headers.addAll(headers)
+      ..fields['sourceType'] = sourceType
+      ..fields['durationMs'] = (durationMs ?? 0).toString();
+    if (sourceUrl != null && sourceUrl.isNotEmpty) {
+      req.fields['sourceUrl'] = sourceUrl;
+    }
+    if (extension != null && extension.isNotEmpty) {
+      req.fields['extension'] = extension;
+    }
+    req.files.add(await http.MultipartFile.fromPath('audio', audio.path));
+    final streamed = await req.send().timeout(const Duration(minutes: 5));
+    final res = await http.Response.fromStream(streamed);
+    if (res.statusCode == 200) {
+      return KalaamModel.fromJson(jsonDecode(res.body));
+    }
+    throw Exception(_parseBody(res)['message'] ?? 'Reference upload failed');
+  }
+
+  /// Persists a completed practice/listen session on the server so streak,
+  /// best-score, and history survive a reinstall or move to a new device.
+  /// [clientToken] makes the call idempotent — the server returns the same
+  /// row when an offline-drain retries the same token.
+  static Future<Map<String, dynamic>> postPracticeSession({
+    required String kalaamId,
+    required String kalaamTitle,
+    required String mode,
+    required DateTime sessionAt,
+    required double overallScore,
+    required double accuracyScore,
+    required double completionScore,
+    required double flowScore,
+    required double pauseScore,
+    required List<double> perLineScores,
+    required String clientToken,
+  }) async {
+    final res = await http.post(
+      Uri.parse('$kBaseUrl/practice/sessions'),
+      headers: await _authHeaders(),
+      body: jsonEncode({
+        'kalaamId': kalaamId,
+        'kalaamTitle': kalaamTitle,
+        'mode': mode,
+        'sessionAt': sessionAt.toUtc().toIso8601String(),
+        'overallScore': overallScore,
+        'accuracyScore': accuracyScore,
+        'completionScore': completionScore,
+        'flowScore': flowScore,
+        'pauseScore': pauseScore,
+        'perLineScores': perLineScores,
+        'clientToken': clientToken,
+      }),
+    );
+    if (res.statusCode == 201 || res.statusCode == 200) {
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    }
+    throw Exception(_parseBody(res)['message'] ?? 'Practice sync failed');
+  }
+
+  /// Removes the server-side reference recitation for a kalaam (owner only).
+  static Future<KalaamModel> deleteReferenceAudio(String kalaamId) async {
+    final res = await http.delete(
+      Uri.parse('$kBaseUrl/kalaams/$kalaamId/reference'),
+      headers: await _authHeaders(),
+    );
+    if (res.statusCode == 200) {
+      return KalaamModel.fromJson(jsonDecode(res.body));
+    }
+    throw Exception(_parseBody(res)['message'] ?? 'Reference delete failed');
+  }
+
   /// Increments the read counter for a kalaam. Fire-and-forget — caller
   /// should not block on the result. Returns `{ reads: int }` on success.
+  ///
+  /// Must send the bearer token: the server only bumps the count on the
+  /// first view per authenticated user (Kalaam.readers gates the $inc), so
+  /// an anonymous call would never count.
   static Future<Map<String, dynamic>> recordView(String id) async {
     final res = await http.post(
       Uri.parse('$kBaseUrl/kalaams/$id/view'),
+      headers: await _authHeaders(),
     );
     if (res.statusCode == 200) return jsonDecode(res.body);
     throw Exception('Failed to record view');

@@ -5,7 +5,12 @@ import 'cached_kalaam.dart';
 import 'cached_queue_item.dart';
 import 'cached_queue_snapshot.dart';
 import 'cached_session.dart';
+import 'kalaam_line_metadata.dart';
+import 'kalaam_practice_meta.dart';
+import 'kalaam_reference_audio.dart';
 import 'my_kalaam_cache.dart';
+import 'pack_record.dart';
+import 'practice_session_record.dart';
 import 'pending_save_op.dart';
 import 'pending_session_op.dart';
 import 'saved_kalaam_cache.dart';
@@ -46,6 +51,11 @@ class IsarService {
         CachedQueueItemSchema,
         CachedQueueSnapshotSchema,
         PendingSessionOpSchema,
+        KalaamReferenceAudioSchema,
+        KalaamLineMetadataSchema,
+        PracticeSessionRecordSchema,
+        KalaamPracticeMetaSchema,
+        PackRecordSchema,
       ],
       directory: dir.path,
       name: 'bayaaz',

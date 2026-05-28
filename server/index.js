@@ -12,6 +12,8 @@ const kalaamRoutes = require('./routes/kalaam');
 const groupRoutes = require('./routes/groups');
 const sessionRoutes = require('./routes/sessions');
 const inviteRoutes = require('./routes/invites');
+const sttRoutes = require('./routes/stt');
+const practiceRoutes = require('./routes/practice');
 const attachSessionHandlers = require('./socket/sessionNamespace');
 
 const app = express();
@@ -48,11 +50,22 @@ app.set('trust proxy', true);
 app.use(cors());
 app.use(express.json());
 
+// Serve uploaded reference recitations. The kalaam route writes files to
+// `<server>/uploads/reference/<kalaamId>.<ext>` and stores an absolute URL
+// referencing this static mount on the Kalaam doc.
+const path = require('path');
+app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
+  maxAge: '7d',
+  fallthrough: false,
+}));
+
 app.use('/api/auth', authRoutes);
 app.use('/api/kalaams', kalaamRoutes);
 app.use('/api/groups', groupRoutes);
 app.use('/api/sessions', sessionRoutes);
 app.use('/api/invites', inviteRoutes);
+app.use('/api/stt', sttRoutes);
+app.use('/api/practice', practiceRoutes);
 
 app.get('/health', (_, res) => res.json({ status: 'ok' }));
 

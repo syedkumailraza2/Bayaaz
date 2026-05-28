@@ -9,6 +9,7 @@ import '../providers/kalaam_provider.dart';
 import '../providers/group_provider.dart';
 import '../providers/theme_provider.dart';
 import '../models/kalaam_model.dart';
+import '../widgets/beta_pill.dart';
 import '../widgets/server_url_dialog.dart';
 import 'groups_screen.dart';
 
@@ -92,13 +93,19 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _onNavTap(int index) {
     setState(() => _currentIndex = index);
-    if (index == 1) {
-      context.read<KalaamProvider>().loadMyKalaams();
-      context.read<KalaamProvider>().loadSavedKalaams();
-    }
-    if (index == 2) {
-      context.read<GroupProvider>().loadGroups();
-    }
+    // Defer provider calls to the next frame so they don't call notifyListeners
+    // synchronously inside the same call stack as setState. Mixing setState +
+    // notifyListeners in the same frame causes "wrong build scope" assertion.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (index == 1) {
+        context.read<KalaamProvider>().loadMyKalaams();
+        context.read<KalaamProvider>().loadSavedKalaams();
+      }
+      if (index == 2) {
+        context.read<GroupProvider>().loadGroups();
+      }
+    });
   }
 
   @override
@@ -444,6 +451,12 @@ class _HeaderRow extends StatelessWidget {
                   ),
                 ),
               ],
+            ),
+            // BETA pill pinned to the left edge — mirrors the theme toggle.
+            const Positioned(
+              left: 0,
+              top: 10,
+              child: BetaPill.onLight(),
             ),
             // Theme toggle pinned to the right edge per Figma.
             Positioned(

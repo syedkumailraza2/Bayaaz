@@ -64,6 +64,22 @@ module.exports = function attachSessionHandlers(io) {
       }
     });
 
+    // --- kalaam:join / kalaam:leave ---
+    // Subscribes the client to per-kalaam engagement broadcasts. The detail
+    // screen joins on open and leaves on dispose so the like / save / view
+    // counters update live across devices viewing the same kalaam.
+    socket.on('kalaam:join', ({ kalaamId }) => {
+      if (typeof kalaamId === 'string' && kalaamId.length > 0) {
+        socket.join(`kalaam:${kalaamId}`);
+      }
+    });
+
+    socket.on('kalaam:leave', ({ kalaamId }) => {
+      if (typeof kalaamId === 'string' && kalaamId.length > 0) {
+        socket.leave(`kalaam:${kalaamId}`);
+      }
+    });
+
     // --- host:setKalam ---
     socket.on('host:setKalam', async ({ sessionId, kalamId }) => {
       try {
@@ -273,6 +289,22 @@ module.exports = function attachSessionHandlers(io) {
         await voskBridge.startBridge(socket, io, sessionId, currentUserId);
       } catch (err) {
         console.error('[voice:start] failed:', err.message);
+        socket.emit('voice:error', { message: err.message });
+      }
+    });
+
+    // --- voice:soloStart ---
+    // Solo follow-my-voice for the single-user practice teleprompter. Takes
+    // a kalaamId instead of a sessionId; matches go back to this socket only
+    // as `voice:soloStanzaChanged`. Frames and ending reuse `voice:frame` /
+    // `voice:end` since the bridge is keyed by socket.id.
+    socket.on('voice:soloStart', async ({ kalaamId }) => {
+      if (!currentUserId) return socket.emit('voice:error', { message: 'Not authenticated' });
+      if (!kalaamId) return socket.emit('voice:error', { message: 'kalaamId required' });
+      try {
+        await voskBridge.startSoloBridge(socket, kalaamId, currentUserId);
+      } catch (err) {
+        console.error('[voice:soloStart] failed:', err.message);
         socket.emit('voice:error', { message: err.message });
       }
     });

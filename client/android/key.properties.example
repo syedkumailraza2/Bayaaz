@@ -1,0 +1,11 @@
+# Copy to android/key.properties and fill in with your release keystore details.
+# DO NOT commit android/key.properties — it is git-ignored.
+#
+# Create a keystore with:
+#   keytool -genkey -v -keystore ~/bayaaz-upload.jks \
+#     -keyalg RSA -keysize 2048 -validity 10000 -alias bayaaz
+
+storePassword=
+keyPassword=
+keyAlias=bayaaz
+storeFile=/absolute/path/to/bayaaz-upload.jks

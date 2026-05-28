@@ -56,13 +56,17 @@ class _KalaamDetailScreenState extends State<KalaamDetailScreen>
     if (_initialized) return;
     _initialized = true;
     _kalaam = ModalRoute.of(context)!.settings.arguments as KalaamModel;
-    // Fire-and-forget read counter bump. The provider reconciles the in-memory
-    // lists optimistically so the count animates up immediately.
     final id = _kalaam?.id;
     if (id != null && id.isNotEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-        context.read<KalaamProvider>().recordView(id);
+        final provider = context.read<KalaamProvider>();
+        // Subscribe to realtime like/save/view broadcasts before recording
+        // the view, so we don't miss our own broadcast bouncing back.
+        provider.subscribeKalaam(id);
+        // Fire-and-forget read counter bump. The provider reconciles the
+        // in-memory lists optimistically so the count animates up immediately.
+        provider.recordView(id);
       });
     }
   }
@@ -70,8 +74,20 @@ class _KalaamDetailScreenState extends State<KalaamDetailScreen>
   @override
   void dispose() {
     _entryController.dispose();
+    final id = _kalaam?.id;
+    if (id != null && id.isNotEmpty) {
+      // Best-effort: dispose runs after deactivate so we can't touch
+      // BuildContext; we rely on the provider ref captured during build.
+      // Server-side socket disconnect cleans up if we miss this hook.
+      _providerRef?.unsubscribeKalaam(id);
+    }
     super.dispose();
   }
+
+  // Stash a reference to the provider during build so dispose can leave the
+  // engagement room without needing the BuildContext (which is unsafe to
+  // touch after deactivate).
+  KalaamProvider? _providerRef;
 
   void _openPractice({required String mode}) {
     final kalaam = _kalaam;
@@ -84,19 +100,6 @@ class _KalaamDetailScreenState extends State<KalaamDetailScreen>
         'mode': mode,
         'startStanza': 0,
       },
-    );
-  }
-
-  void _openReadSheet() {
-    final kalaam = _kalaam;
-    if (kalaam == null) return;
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      barrierColor: Colors.black.withValues(alpha: 0.45),
-      builder: (sheetCtx) => _ReadSheet(kalaam: kalaam, isDark: isDark),
     );
   }
 
@@ -136,6 +139,9 @@ class _KalaamDetailScreenState extends State<KalaamDetailScreen>
       }
       return kalaam;
     });
+
+    // Stash for dispose-time room cleanup (BuildContext is unsafe there).
+    _providerRef ??= context.read<KalaamProvider>();
 
     final cat = _CategoryGlyph.from(liveKalaam.category);
     final size = MediaQuery.of(context).size;
@@ -187,15 +193,16 @@ class _KalaamDetailScreenState extends State<KalaamDetailScreen>
                                   child: _StatsRow(
                                     isDark: isDark,
                                     likes: liveKalaam.likesCount,
-                                    // Per-kalaam save aggregation is not yet
-                                    // computed server-side; placeholder until
-                                    // the next backend pass.
-                                    saves: 0,
+                                    saves: liveKalaam.savesCount,
                                     reads: liveKalaam.reads,
                                     liked: liveKalaam.likedByMe,
+                                    saved: liveKalaam.savedByMe,
                                     onLikeTap: () => context
                                         .read<KalaamProvider>()
                                         .toggleLike(liveKalaam.id),
+                                    onSaveTap: () => context
+                                        .read<KalaamProvider>()
+                                        .toggleSave(liveKalaam.id),
                                     animateIn: t > 0.30,
                                   ),
                                 ),
@@ -204,9 +211,8 @@ class _KalaamDetailScreenState extends State<KalaamDetailScreen>
                                   progress: _stagger(t, 0.45, 0.85),
                                   child: _CtaRow(
                                     isDark: isDark,
-                                    onRead: _openReadSheet,
-                                    onFollowVoice: () =>
-                                        _openPractice(mode: 'follow'),
+                                    onRead: () => _openPractice(mode: 'follow'),
+                                    onPractice: () => _openPractice(mode: 'listen'),
                                   ),
                                 ),
                                 const SizedBox(height: 10),
@@ -455,8 +461,10 @@ class _StatsRow extends StatelessWidget {
   final int saves;
   final int reads;
   final bool liked;
+  final bool saved;
   final bool animateIn;
   final VoidCallback onLikeTap;
+  final VoidCallback onSaveTap;
 
   const _StatsRow({
     required this.isDark,
@@ -464,8 +472,10 @@ class _StatsRow extends StatelessWidget {
     required this.saves,
     required this.reads,
     required this.liked,
+    required this.saved,
     required this.animateIn,
     required this.onLikeTap,
+    required this.onSaveTap,
   });
 
   @override
@@ -491,11 +501,13 @@ class _StatsRow extends StatelessWidget {
           ),
           Expanded(
             child: _StatCell(
-              icon: Icons.bookmark_outline,
+              icon: saved ? Icons.bookmark_rounded : Icons.bookmark_outline,
+              iconColor: saved ? _kTeal : null,
               value: saves,
               label: 'Saves',
               isDark: isDark,
               animateIn: animateIn,
+              onTap: onSaveTap,
             ),
           ),
           Expanded(
@@ -591,12 +603,12 @@ class _StatCell extends StatelessWidget {
 class _CtaRow extends StatelessWidget {
   final bool isDark;
   final VoidCallback onRead;
-  final VoidCallback onFollowVoice;
+  final VoidCallback onPractice;
 
   const _CtaRow({
     required this.isDark,
     required this.onRead,
-    required this.onFollowVoice,
+    required this.onPractice,
   });
 
   @override
@@ -617,9 +629,9 @@ class _CtaRow extends StatelessWidget {
           child: _PressablePill(
             background: isDark ? const Color(0xFF1F1F1F) : Colors.black,
             foreground: Colors.white,
-            icon: Icons.graphic_eq_rounded,
-            label: 'Follow My Voice',
-            onTap: onFollowVoice,
+            icon: Icons.mic_rounded,
+            label: 'Practice Mode',
+            onTap: onPractice,
           ),
         ),
       ],
@@ -794,203 +806,5 @@ class _CategoryGlyph {
       default:
         return const _CategoryGlyph('بیاض');
     }
-  }
-}
-
-// ─── Read sheet (inline reader) ─────────────────────────────────────────────
-// Replaces the previous navigation to PracticeModeScreen for the Read CTA.
-// Opens as a draggable modal sheet over the detail screen, with the kalaam's
-// stanzas separated by the brand's orange-diamond divider.
-
-class _ReadSheet extends StatelessWidget {
-  final KalaamModel kalaam;
-  final bool isDark;
-  const _ReadSheet({required this.kalaam, required this.isDark});
-
-  @override
-  Widget build(BuildContext context) {
-    final sheetBg = isDark ? const Color(0xFF111111) : Colors.white;
-    final titleColor = isDark ? Colors.white : Colors.black;
-    final stanzaColor = isDark ? const Color(0xFFE8E8E8) : const Color(0xFF1F1F1F);
-    final dividerLine = isDark
-        ? Colors.white.withValues(alpha: 0.10)
-        : Colors.black.withValues(alpha: 0.08);
-    final handleColor =
-        isDark ? const Color(0xFF2A2A2A) : const Color(0xFFE2E2E2);
-    final tagBg = isDark ? const Color(0xFF2A1A0C) : const Color(0xFFFDA944);
-    final tagFg = isDark ? const Color(0xFFFDA944) : Colors.white;
-    final firstTag = kalaam.tags.isNotEmpty ? kalaam.tags.first : null;
-
-    return DraggableScrollableSheet(
-      initialChildSize: 0.78,
-      minChildSize: 0.45,
-      maxChildSize: 0.95,
-      expand: false,
-      builder: (ctx, scrollController) {
-        return Container(
-          decoration: BoxDecoration(
-            color: sheetBg,
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.18),
-                blurRadius: 28,
-                offset: const Offset(0, -4),
-              ),
-            ],
-          ),
-          child: Column(
-            children: [
-              const SizedBox(height: 10),
-              Container(
-                width: 38,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: handleColor,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              const SizedBox(height: 10),
-              Text(
-                'Swipe down to close',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: isDark ? Colors.white38 : _kInkMuted,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              const SizedBox(height: 14),
-              if (firstTag != null) ...[
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: tagBg,
-                    borderRadius: BorderRadius.circular(40),
-                  ),
-                  child: Text(
-                    firstTag,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: tagFg,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: -0.2,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-              ],
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 24),
-                child: Text(
-                  kalaam.title,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 24,
-                    color: titleColor,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: -0.6,
-                    height: 1.2,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 6),
-              Expanded(
-                child: kalaam.content.isEmpty
-                    ? Center(
-                        child: Padding(
-                          padding: const EdgeInsets.all(24),
-                          child: Text(
-                            'This kalaam has no content yet.',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: isDark
-                                  ? Colors.white54
-                                  : _kInkMuted,
-                            ),
-                          ),
-                        ),
-                      )
-                    : ListView.separated(
-                        controller: scrollController,
-                        padding: const EdgeInsets.fromLTRB(24, 16, 24, 40),
-                        itemCount: kalaam.content.length,
-                        separatorBuilder: (_, _) => _DiamondDivider(
-                          lineColor: dividerLine,
-                        ),
-                        itemBuilder: (ctx, i) {
-                          final stanza = kalaam.content[i];
-                          return Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            child: Text(
-                              stanza.lines.join('\n'),
-                              textAlign: TextAlign.center,
-                              textDirection: _detectDirection(stanza.lines),
-                              style: TextStyle(
-                                fontSize: 16,
-                                height: 1.55,
-                                color: stanzaColor,
-                                fontWeight: FontWeight.w500,
-                                letterSpacing: -0.2,
-                              ),
-                            ),
-                          );
-                        },
-                      ),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  // Pick RTL when the first non-whitespace character is in the Arabic block,
-  // so Urdu/Arabic stanzas render correctly while Roman-Urdu stays LTR.
-  static TextDirection _detectDirection(List<String> lines) {
-    for (final line in lines) {
-      for (final code in line.runes) {
-        if (code == 0x20 || code == 0x09) continue;
-        // Arabic + Arabic Supplement + Arabic Extended-A blocks.
-        if ((code >= 0x0600 && code <= 0x06FF) ||
-            (code >= 0x0750 && code <= 0x077F) ||
-            (code >= 0x08A0 && code <= 0x08FF) ||
-            (code >= 0xFB50 && code <= 0xFDFF) ||
-            (code >= 0xFE70 && code <= 0xFEFF)) {
-          return TextDirection.rtl;
-        }
-        return TextDirection.ltr;
-      }
-    }
-    return TextDirection.ltr;
-  }
-}
-
-class _DiamondDivider extends StatelessWidget {
-  final Color lineColor;
-  const _DiamondDivider({required this.lineColor});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: Row(
-        children: [
-          Expanded(child: Container(height: 1, color: lineColor)),
-          const SizedBox(width: 10),
-          Transform.rotate(
-            angle: 0.7853981633974483, // pi / 4
-            child: Container(
-              width: 8,
-              height: 8,
-              decoration: const BoxDecoration(color: Color(0xFFFDA944)),
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(child: Container(height: 1, color: lineColor)),
-        ],
-      ),
-    );
   }
 }

@@ -7,6 +7,7 @@ import 'db/isar_service.dart';
 import 'providers/auth_provider.dart';
 import 'providers/connectivity_provider.dart';
 import 'providers/kalaam_provider.dart';
+import 'providers/listen_session_provider.dart';
 import 'providers/practice_provider.dart';
 import 'providers/group_provider.dart';
 import 'providers/session_provider.dart';
@@ -19,13 +20,25 @@ import 'screens/practice_mode_screen.dart';
 import 'screens/group_detail_screen.dart';
 import 'screens/group_session_screen.dart';
 import 'screens/group_session_teleprompter.dart';
+import 'screens/pack_download_screen.dart';
+import 'screens/practice_results_screen.dart';
 import 'services/deep_link_service.dart';
+import 'services/device_capability_service.dart';
+import 'widgets/beta_pill.dart';
+import 'services/llm_service.dart';
 import 'services/offline_sync_service.dart';
+import 'services/pack_manager.dart';
 import 'services/warmup_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await AppConfig.init();
+  // Detect device tier once at startup so all downstream services can use it
+  // synchronously via DeviceCapabilityService.instance.tier.
+  await DeviceCapabilityService.instance.detectTier();
+  // Fire-and-forget: expire stale coach pack, auto-download for high-tier,
+  // then mark LlmService as loaded if the model file is on disk.
+  unawaited(_initCoachPack());
   runApp(
     MultiProvider(
       providers: [
@@ -41,6 +54,7 @@ void main() async {
           },
         ),
         ChangeNotifierProvider(create: (_) => PracticeProvider()),
+        ChangeNotifierProvider(create: (_) => ListenSessionProvider()),
         ChangeNotifierProvider(create: (_) => GroupProvider()),
         ChangeNotifierProxyProvider<ConnectivityProvider, SessionProvider>(
           create: (_) => SessionProvider(),
@@ -59,6 +73,16 @@ void main() async {
 /// Top-level navigator key so the deep-link service can push routes from
 /// outside a widget context.
 final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
+
+/// Manages the on-device coach pack lifecycle:
+///   1. Delete the pack if it is older than 24 hours.
+///   2. Auto-download a fresh copy on high-end devices (silent, no user prompt).
+///   3. Tell LlmService the model is ready once the file is on disk.
+Future<void> _initCoachPack() async {
+  await PackManager.instance.expireIfNeeded(PackId.coach);
+  await PackManager.instance.autoInstallCoach();
+  await LlmService.instance.tryLoadFromInstalledPack();
+}
 
 class BayaazApp extends StatelessWidget {
   const BayaazApp({super.key});
@@ -104,6 +128,8 @@ class BayaazApp extends StatelessWidget {
         '/group': (_) => const GroupDetailScreen(),
         '/session': (_) => const GroupSessionScreen(),
         '/group-teleprompter': (_) => const GroupSessionTeleprompter(),
+        '/practice-results': (_) => const PracticeResultsScreen(),
+        '/packs': (_) => const PackDownloadScreen(),
       },
     );
   }
@@ -122,6 +148,7 @@ class _SplashRouterState extends State<_SplashRouter>
   late final AnimationController _anim;
   late final Animation<double> _titleFade;
   late final Animation<double> _subtitleFade;
+  late final Animation<double> _bottomLine;
 
   // Becomes true once the warmup ping has been slow long enough to warrant
   // showing the user a "Waking up server…" hint. Render cold starts take
@@ -145,6 +172,10 @@ class _SplashRouterState extends State<_SplashRouter>
     _subtitleFade = CurvedAnimation(
       parent: _anim,
       curve: const Interval(0.55, 0.85, curve: Curves.easeOut),
+    );
+    _bottomLine = CurvedAnimation(
+      parent: _anim,
+      curve: const Interval(0.72, 0.95, curve: Curves.easeOut),
     );
     _anim.forward();
     _bootstrap();
@@ -295,52 +326,70 @@ class _SplashRouterState extends State<_SplashRouter>
                             ),
                           ),
                         ),
+                        const SizedBox(height: 20),
+                        FadeTransition(
+                          opacity: _subtitleFade,
+                          child: const BetaPill.onTeal(),
+                        ),
                       ],
                     ),
                   ),
-                ),
-                const SizedBox(height: 24),
-                _AnimatedHairline(animation: _bottomLine, color: gold),
-                const SizedBox(height: 28),
-                AnimatedOpacity(
-                  duration: const Duration(milliseconds: 300),
-                  opacity: _showColdStartHint ? 1.0 : 0.0,
-                  child: Directionality(
-                    textDirection: TextDirection.ltr,
-                    child: Row(
+                  Positioned(
+                    bottom: 52,
+                    left: 24,
+                    right: 24,
+                    child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        SizedBox(
-                          width: 12,
-                          height: 12,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 1.5,
-                            valueColor:
-                                AlwaysStoppedAnimation<Color>(gold.withValues(alpha: 0.6)),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Text(
-                          'Waking up server…',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: gold.withValues(alpha: 0.65),
-                            letterSpacing: 1.4,
-                            fontWeight: FontWeight.w300,
+                        _AnimatedHairline(
+                            animation: _bottomLine, color: gold),
+                        const SizedBox(height: 24),
+                        AnimatedOpacity(
+                          duration: const Duration(milliseconds: 300),
+                          opacity: _showColdStartHint ? 1.0 : 0.0,
+                          child: Directionality(
+                            textDirection: TextDirection.ltr,
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                SizedBox(
+                                  width: 12,
+                                  height: 12,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 1.5,
+                                    valueColor: AlwaysStoppedAnimation<Color>(
+                                        gold.withValues(alpha: 0.6)),
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Text(
+                                  'Waking up server…',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: gold.withValues(alpha: 0.65),
+                                    letterSpacing: 1.4,
+                                    fontWeight: FontWeight.w300,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ],
                     ),
                   ),
-                ),
-              ],
-            ),
+                ],
+              );
+            },
           ),
         ),
       ),
     );
   }
 }
+
+const gold = Color(0xFFFDBA55);
 
 // "بیاض" rendered with the orange Figma gradient (#FDA43F → #FDBA55) using a
 // ShaderMask so the fill matches the source design exactly.
@@ -363,10 +412,27 @@ class _GradientWordmark extends StatelessWidget {
         style: TextStyle(
           fontSize: 64,
           height: 1.0,
-          color: Colors.white, // masked to the gradient above
+          color: Colors.white,
           fontWeight: FontWeight.w500,
           letterSpacing: -1.28,
         ),
+      ),
+    );
+  }
+}
+
+class _AnimatedHairline extends StatelessWidget {
+  final Animation<double> animation;
+  final Color color;
+  const _AnimatedHairline({required this.animation, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: animation,
+      child: Container(
+        height: 0.5,
+        color: color,
       ),
     );
   }

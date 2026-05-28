@@ -48,6 +48,17 @@ class KalaamModel {
   final int likesCount;
   final bool likedByMe;
   final int reads;
+  // Per-kalaam aggregate save count (people who've added this to their
+  // library) + whether the requesting user is one of them. Computed
+  // server-side from User.savedKalaams + the denormalised Kalaam.savesCount
+  // mirror, so the detail screen can render a live counter without an
+  // extra request.
+  final int savesCount;
+  final bool savedByMe;
+  // Follow-voice reference recitation attached to the kalaam, if any.
+  // Synced from the server so a second device can re-download the file
+  // instead of being limited to whatever lives in the uploader's app-docs.
+  final KalaamReferenceMedia? referenceAudio;
 
   KalaamModel({
     required this.id,
@@ -62,6 +73,9 @@ class KalaamModel {
     this.likesCount = 0,
     this.likedByMe = false,
     this.reads = 0,
+    this.savesCount = 0,
+    this.savedByMe = false,
+    this.referenceAudio,
   });
 
   // Flat preview text for card display (first stanza, first 3 lines)
@@ -83,6 +97,10 @@ class KalaamModel {
     int? likesCount,
     bool? likedByMe,
     int? reads,
+    int? savesCount,
+    bool? savedByMe,
+    KalaamReferenceMedia? referenceAudio,
+    bool clearReferenceAudio = false,
   }) {
     return KalaamModel(
       id: id ?? this.id,
@@ -97,6 +115,11 @@ class KalaamModel {
       likesCount: likesCount ?? this.likesCount,
       likedByMe: likedByMe ?? this.likedByMe,
       reads: reads ?? this.reads,
+      savesCount: savesCount ?? this.savesCount,
+      savedByMe: savedByMe ?? this.savedByMe,
+      referenceAudio: clearReferenceAudio
+          ? null
+          : (referenceAudio ?? this.referenceAudio),
     );
   }
 
@@ -117,6 +140,41 @@ class KalaamModel {
         likesCount: (json['likesCount'] as num?)?.toInt() ?? 0,
         likedByMe: json['likedByMe'] == true,
         reads: (json['reads'] as num?)?.toInt() ?? 0,
+        savesCount: (json['savesCount'] as num?)?.toInt() ?? 0,
+        savedByMe: json['savedByMe'] == true,
+        referenceAudio: json['referenceAudio'] is Map
+            ? KalaamReferenceMedia.fromJson(
+                Map<String, dynamic>.from(json['referenceAudio'] as Map),
+              )
+            : null,
+      );
+}
+
+/// Server-attached follow-voice reference. Mirrors the `referenceAudio`
+/// subdoc on the Kalaam document. Distinct from the Isar
+/// `KalaamReferenceMedia` collection (which tracks the *local* cached copy).
+class KalaamReferenceMedia {
+  final String url;
+  final String sourceType;
+  final String? sourceUrl;
+  final int durationMs;
+  final String extension;
+
+  const KalaamReferenceMedia({
+    required this.url,
+    required this.sourceType,
+    this.sourceUrl,
+    this.durationMs = 0,
+    this.extension = '',
+  });
+
+  factory KalaamReferenceMedia.fromJson(Map<String, dynamic> json) =>
+      KalaamReferenceMedia(
+        url: json['url']?.toString() ?? '',
+        sourceType: json['sourceType']?.toString() ?? 'audio_file',
+        sourceUrl: json['sourceUrl']?.toString(),
+        durationMs: (json['durationMs'] as num?)?.toInt() ?? 0,
+        extension: json['extension']?.toString() ?? '',
       );
 }
 

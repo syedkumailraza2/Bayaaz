@@ -1,6 +1,8 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:isar/isar.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../db/cached_kalaam.dart';
 import '../db/cached_queue_item.dart';
@@ -15,7 +17,9 @@ import '../db/sync_meta.dart';
 import '../models/kalaam_model.dart';
 import '../models/queue_item_model.dart';
 import '../models/session_model.dart';
+import 'analytics_service.dart';
 import 'api_service.dart';
+import 'reference_audio_service.dart';
 
 const Duration kFeedTtl = Duration(days: 1);
 const Duration kSavedTtl = Duration(days: 10);
@@ -250,6 +254,9 @@ class OfflineSyncService {
   Future<void> syncAll() async {
     if (!IsarService.instance.isOpen) return;
     await drainPendingOps();
+    await drainPendingEngagement();
+    await drainPendingReferenceUploads();
+    await AnalyticsService.instance.drainPendingPracticeSessions();
     await _maybeSyncFeed();
     await _maybeSyncSaved();
     await _maybeSyncMy();
@@ -559,6 +566,133 @@ class OfflineSyncService {
         });
         // Halt the drain — next sync window will retry.
         break;
+      }
+    }
+  }
+
+  // ─── Pending like / view intents ───────────────────────────────────────────
+  // Like and view are tiny intent records, not full mutations, so a list of
+  // kalaam-ids in SharedPreferences is plenty — no Isar codegen needed.
+  // Like queue toggles by parity: two stashes for the same id cancel out
+  // (matches the server's toggle semantics). View queue is a Set since the
+  // server is already idempotent per user.
+  static const _kPendingLikeToggles = 'pending_like_toggles';
+  static const _kPendingViews = 'pending_views';
+
+  Future<void> stashPendingLikeToggle(String kalaamId) async {
+    if (kalaamId.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    final list = prefs.getStringList(_kPendingLikeToggles) ?? const <String>[];
+    // Even number of entries for a given id = net-zero, so we cancel pairs
+    // instead of queueing them both.
+    final lastIdx = list.lastIndexOf(kalaamId);
+    if (lastIdx >= 0) {
+      final next = List<String>.from(list)..removeAt(lastIdx);
+      if (next.isEmpty) {
+        await prefs.remove(_kPendingLikeToggles);
+      } else {
+        await prefs.setStringList(_kPendingLikeToggles, next);
+      }
+      return;
+    }
+    await prefs.setStringList(_kPendingLikeToggles, [...list, kalaamId]);
+  }
+
+  Future<void> stashPendingView(String kalaamId) async {
+    if (kalaamId.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    final set = (prefs.getStringList(_kPendingViews) ?? []).toSet();
+    set.add(kalaamId);
+    await prefs.setStringList(_kPendingViews, set.toList());
+  }
+
+  Future<void> drainPendingEngagement() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    final likes = prefs.getStringList(_kPendingLikeToggles) ?? const <String>[];
+    final unsentLikes = <String>[];
+    for (final id in likes) {
+      try {
+        await ApiService.toggleLike(id);
+      } catch (e) {
+        debugPrint('[sync] like drain failed for $id: $e');
+        unsentLikes.add(id);
+      }
+    }
+    if (unsentLikes.isEmpty) {
+      await prefs.remove(_kPendingLikeToggles);
+    } else {
+      await prefs.setStringList(_kPendingLikeToggles, unsentLikes);
+    }
+
+    final views = prefs.getStringList(_kPendingViews) ?? const <String>[];
+    final unsentViews = <String>[];
+    for (final id in views) {
+      try {
+        await ApiService.recordView(id);
+      } catch (e) {
+        debugPrint('[sync] view drain failed for $id: $e');
+        unsentViews.add(id);
+      }
+    }
+    if (unsentViews.isEmpty) {
+      await prefs.remove(_kPendingViews);
+    } else {
+      await prefs.setStringList(_kPendingViews, unsentViews);
+    }
+  }
+
+  // ─── Pending reference-audio uploads ───────────────────────────────────────
+  // Kalaam reference recitations are heavy (audio/video bytes) and don't
+  // naturally fit a small Isar op row, so we track the pending kalaam-ids
+  // in SharedPreferences and replay through ReferenceAudioService on drain.
+  // Files themselves live in app-docs `reference_audio/<id>.<ext>` keyed by
+  // kalaam id — no copy is needed beyond what `extractAndNormalize` did.
+  static const _kPendingRefUploads = 'pending_reference_uploads';
+
+  Future<void> stashPendingReferenceUpload(String kalaamId) async {
+    if (kalaamId.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    final set = (prefs.getStringList(_kPendingRefUploads) ?? []).toSet();
+    set.add(kalaamId);
+    await prefs.setStringList(_kPendingRefUploads, set.toList());
+  }
+
+  Future<void> clearPendingReferenceUpload(String kalaamId) async {
+    final prefs = await SharedPreferences.getInstance();
+    final list = prefs.getStringList(_kPendingRefUploads) ?? const <String>[];
+    if (!list.contains(kalaamId)) return;
+    final remaining = list.where((id) => id != kalaamId).toList();
+    if (remaining.isEmpty) {
+      await prefs.remove(_kPendingRefUploads);
+    } else {
+      await prefs.setStringList(_kPendingRefUploads, remaining);
+    }
+  }
+
+  Future<List<String>> readPendingReferenceUploads() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getStringList(_kPendingRefUploads) ?? const <String>[];
+  }
+
+  /// Replays every pending reference upload, invoking [onUploaded] with the
+  /// server-fresh kalaam so the calling provider can patch its in-memory
+  /// lists. Best-effort: a failure leaves the id in the queue for a later
+  /// drain (typically the next online→offline transition).
+  Future<void> drainPendingReferenceUploads({
+    void Function(KalaamModel updated)? onUploaded,
+  }) async {
+    final ids = await readPendingReferenceUploads();
+    for (final id in ids) {
+      try {
+        final updated =
+            await ReferenceAudioService.instance.uploadToServer(id);
+        if (updated != null) {
+          await clearPendingReferenceUpload(id);
+          onUploaded?.call(updated);
+        }
+      } catch (e) {
+        debugPrint('[sync] reference upload retry failed for $id: $e');
       }
     }
   }

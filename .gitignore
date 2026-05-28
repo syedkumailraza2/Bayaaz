@@ -1,0 +1,37 @@
+# macOS
+.DS_Store
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local env files
+.env
+.env.local
+.env.*.local
+
+# Whisper / Vosk service — large model weights and Python venv
+whisper-service/venv/
+whisper-service/__pycache__/
+whisper-service/*.gguf
+whisper-service/Phi-3-mini-4k-instruct-q4.gguf
+whisper-service/model/
+whisper-service/vosk-model-*/
+
+# Node
+node_modules/
+
+# Next.js (landing)
+landing/.next/
+landing/out/
+landing/.turbo/
+
+# Server uploads (user-generated reference audio/video)
+server/uploads/

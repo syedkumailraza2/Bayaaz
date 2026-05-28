@@ -9,6 +9,7 @@
 
 const WebSocket = require('ws');
 const Session = require('../model/Session');
+const Kalaam = require('../model/Kalaam');
 const { splitKalaamHemistichs } = require('./hemistichSplit');
 const { matchTranscriptToKalaam, _tokens } = require('./kalaamMatcher');
 
@@ -23,8 +24,8 @@ const _lastVoiceSaveAt = new Map();
 // { ws, sessionId, kalaam, cursorStanza, cursorLine, lastEmittedKey }
 const bridges = new Map();
 
-function logTag(socketId, sessionId) {
-  return `[vosk-bridge socket=${socketId.slice(0, 6)} session=${sessionId.slice(-6)}]`;
+function logTag(socketId, scopeId) {
+  return `[vosk-bridge socket=${socketId.slice(0, 6)} scope=${String(scopeId).slice(-6)}]`;
 }
 
 // Build a closed-vocabulary grammar list from the kalaam tokens. Vosk
@@ -42,44 +43,26 @@ function grammarFromKalaam(kalaam) {
   return seen.size >= 4 ? Array.from(seen) : null;
 }
 
-async function startBridge(socket, io, sessionId, userId) {
-  await stopBridge(socket);
-
-  const session = await Session.findById(sessionId)
-    .populate('currentKalamId', 'title content');
-  if (!session) {
-    socket.emit('voice:error', { message: 'Session not found' });
-    return;
-  }
-  if (session.hostId.toString() !== userId) {
-    socket.emit('voice:error', { message: 'Host only' });
-    return;
-  }
-  if (!session.currentKalamId) {
-    socket.emit('voice:error', { message: 'No current kalaam set' });
-    return;
-  }
-
-  const kalaam = splitKalaamHemistichs(session.currentKalamId);
-  const tag = logTag(socket.id, sessionId);
-
+// Shared bridge setup. The session-based path broadcasts cursor changes to
+// the session room and persists them to Mongo. The solo path emits cursor
+// changes only back to the calling socket (no session, no persistence) —
+// it powers the single-user follow-my-voice teleprompter.
+function _openBridge(socket, kalaam, scopeId, tag, onMatch) {
   const ws = new WebSocket(VOSK_URL);
   const state = {
     ws,
-    sessionId,
+    scopeId,
     kalaam,
-    cursorStanza: session.currentStanza,
-    cursorLine: session.currentLine,
-    lastEmittedKey: `${session.currentStanza}:${session.currentLine}`,
+    cursorStanza: 0,
+    cursorLine: 0,
+    lastEmittedKey: '0:0',
     framesIn: 0,
     bytesIn: 0,
   };
   bridges.set(socket.id, state);
 
   ws.on('open', () => {
-    console.log(`${tag} opened — sending config (grammar disabled by default; uncomment if model supports it)`);
-    // Grammar mode tightens recognition to a closed vocabulary. Most small
-    // Vosk models accept it; some don't. Start open; flip on once verified.
+    console.log(`${tag} opened`);
     ws.send(JSON.stringify({ config: { sample_rate: SAMPLE_RATE } }));
     socket.emit('voice:ready', {});
   });
@@ -120,6 +103,45 @@ async function startBridge(socket, io, sessionId, userId) {
       text, match.stanza, match.line, match.score, match.matchedText,
     );
 
+    onMatch(match, isFinal);
+  });
+
+  ws.on('close', (code, reason) => {
+    console.log(`${tag} closed code=%s reason=%s frames=%d bytes=%d`,
+      code, reason?.toString() || '', state.framesIn, state.bytesIn);
+    if (bridges.get(socket.id) === state) bridges.delete(socket.id);
+  });
+
+  ws.on('error', (err) => {
+    console.error(`${tag} ws error:`, err.message);
+    socket.emit('voice:error', { message: err.message });
+  });
+
+  return state;
+}
+
+async function startBridge(socket, io, sessionId, userId) {
+  await stopBridge(socket);
+
+  const session = await Session.findById(sessionId)
+    .populate('currentKalamId', 'title content');
+  if (!session) {
+    socket.emit('voice:error', { message: 'Session not found' });
+    return;
+  }
+  if (session.hostId.toString() !== userId) {
+    socket.emit('voice:error', { message: 'Host only' });
+    return;
+  }
+  if (!session.currentKalamId) {
+    socket.emit('voice:error', { message: 'No current kalaam set' });
+    return;
+  }
+
+  const kalaam = splitKalaamHemistichs(session.currentKalamId);
+  const tag = logTag(socket.id, sessionId);
+
+  const state = _openBridge(socket, kalaam, sessionId, tag, (match) => {
     io.to('session:' + sessionId).emit('session:stanzaChanged', {
       stanza: match.stanza,
       line: match.line,
@@ -135,15 +157,46 @@ async function startBridge(socket, io, sessionId, userId) {
     }
   });
 
-  ws.on('close', (code, reason) => {
-    console.log(`${tag} closed code=%s reason=%s frames=%d bytes=%d`,
-      code, reason?.toString() || '', state.framesIn, state.bytesIn);
-    if (bridges.get(socket.id) === state) bridges.delete(socket.id);
-  });
+  state.cursorStanza = session.currentStanza;
+  state.cursorLine = session.currentLine;
+  state.lastEmittedKey = `${session.currentStanza}:${session.currentLine}`;
+}
 
-  ws.on('error', (err) => {
-    console.error(`${tag} ws error:`, err.message);
-    socket.emit('voice:error', { message: err.message });
+// Solo (no session) follow-my-voice bridge. The Flutter practice screen
+// streams PCM the same way, but cursor matches go straight back to the
+// caller as `voice:soloStanzaChanged` instead of being broadcast to a room.
+async function startSoloBridge(socket, kalaamId, userId) {
+  await stopBridge(socket);
+
+  if (!userId) {
+    socket.emit('voice:error', { message: 'Not authenticated' });
+    return;
+  }
+  if (!kalaamId) {
+    socket.emit('voice:error', { message: 'kalaamId required' });
+    return;
+  }
+
+  const kalaamDoc = await Kalaam.findById(kalaamId).select('title content');
+  if (!kalaamDoc) {
+    socket.emit('voice:error', { message: 'Kalaam not found' });
+    return;
+  }
+
+  // Do NOT split hemistichs here — the practice screen renders the kalaam
+  // from the regular kalaams API which doesn't apply the split. Keeping
+  // the structure identical keeps the (stanza, line) coordinates the
+  // matcher emits aligned with the client's flat _LineItem list.
+  const kalaam = typeof kalaamDoc.toObject === 'function'
+    ? kalaamDoc.toObject()
+    : kalaamDoc;
+  const tag = logTag(socket.id, kalaamId);
+
+  _openBridge(socket, kalaam, kalaamId, tag, (match) => {
+    socket.emit('voice:soloStanzaChanged', {
+      stanza: match.stanza,
+      line: match.line,
+    });
   });
 }
 
@@ -174,4 +227,4 @@ async function stopBridge(socket) {
   } catch {}
 }
 
-module.exports = { startBridge, pushFrame, stopBridge };
+module.exports = { startBridge, startSoloBridge, pushFrame, stopBridge };

@@ -1,8 +1,12 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../db/isar_service.dart';
 import '../models/kalaam_model.dart';
 import '../services/api_service.dart';
 import '../services/offline_sync_service.dart';
+import '../services/socket_service.dart';
 import 'connectivity_provider.dart';
 
 class KalaamProvider extends ChangeNotifier {
@@ -41,9 +45,65 @@ class KalaamProvider extends ChangeNotifier {
   bool get _isOnline => _connectivity?.isOnline ?? true;
   OfflineSyncService get _sync => OfflineSyncService.instance;
 
+  // ── Realtime engagement plumbing ────────────────────────────────────────
+  // The detail screen calls subscribeKalaam(id) on open and unsubscribe on
+  // close. We attach a single `kalaam:engagement` listener the first time a
+  // subscription is requested and reference-count it so we don't tear it
+  // down while another card/screen still cares.
+  final Set<String> _subscribedKalaamIds = <String>{};
+  bool _engagementListenerAttached = false;
+
   /// Wired from main.dart via ChangeNotifierProxyProvider.
   void attachConnectivity(ConnectivityProvider c) {
     _connectivity = c;
+  }
+
+  // ── Realtime engagement broadcasts ──────────────────────────────────────
+
+  /// Joins the kalaam's engagement room so this client receives realtime
+  /// like / save / view updates whenever any other user interacts. Lazy:
+  /// the first call attaches the singleton socket listener; subsequent
+  /// calls just register the id.
+  Future<void> subscribeKalaam(String id) async {
+    if (id.isEmpty) return;
+    _subscribedKalaamIds.add(id);
+    if (!_engagementListenerAttached) {
+      _engagementListenerAttached = true;
+      try {
+        await SocketService().connect();
+      } catch (e) {
+        debugPrint('[engagement] socket connect failed: $e');
+      }
+      SocketService().on('kalaam:engagement', _onEngagementEvent);
+    }
+    SocketService().joinKalaam(id);
+  }
+
+  /// Stops listening for engagement updates for the given kalaam. We keep
+  /// the global listener attached because re-attaching on every screen
+  /// open would race against in-flight events.
+  void unsubscribeKalaam(String id) {
+    if (id.isEmpty) return;
+    _subscribedKalaamIds.remove(id);
+    SocketService().leaveKalaam(id);
+  }
+
+  void _onEngagementEvent(dynamic data) {
+    if (data is! Map) return;
+    final id = data['kalaamId']?.toString();
+    if (id == null || id.isEmpty) return;
+    final source = _findKalaamInMemory(id);
+    if (source == null) return;
+    final likesCount = (data['likesCount'] as num?)?.toInt();
+    final savesCount = (data['savesCount'] as num?)?.toInt();
+    final reads = (data['reads'] as num?)?.toInt();
+    if (likesCount == null && savesCount == null && reads == null) return;
+    _applyKalaamUpdate(source.copyWith(
+      likesCount: likesCount ?? source.likesCount,
+      savesCount: savesCount ?? source.savesCount,
+      reads: reads ?? source.reads,
+    ));
+    notifyListeners();
   }
 
   // Getters — feed
@@ -436,31 +496,66 @@ class KalaamProvider extends ChangeNotifier {
     // mirror it into _savedKalaams and the Isar cache.
     final source = _findKalaamInMemory(id);
 
+    // Apply the optimistic save-count bump everywhere the kalaam appears
+    // so the detail screen counter ticks the moment the user taps.
+    void applyOptimistic({required bool saved}) {
+      if (source == null) return;
+      final delta = saved ? 1 : -1;
+      _applyKalaamUpdate(source.copyWith(
+        savedByMe: saved,
+        savesCount: (source.savesCount + delta).clamp(0, 1 << 31),
+      ));
+    }
+
     if (!_isOnline) {
       if (willSave) {
         if (source == null) return false; // nothing to save offline
         _savedIds.add(id);
         _savedKalaams.removeWhere((k) => k.id == id);
-        _savedKalaams.insert(0, source);
-        await _sync.stashOfflineSave(source);
+        applyOptimistic(saved: true);
+        // Use the patched copy so the cached list matches the live counters.
+        final patched = _findKalaamInMemory(id) ?? source;
+        _savedKalaams.insert(0, patched);
+        await _sync.stashOfflineSave(patched);
       } else {
         _savedIds.remove(id);
         _savedKalaams.removeWhere((k) => k.id == id);
+        applyOptimistic(saved: false);
         await _sync.stashOfflineUnsave(id);
       }
       notifyListeners();
       return willSave;
     }
 
+    // Optimistic flip — the server response below reconciles the exact
+    // count (and rolls us back if the round-trip fails).
+    applyOptimistic(saved: willSave);
+    if (willSave) {
+      _savedIds.add(id);
+    } else {
+      _savedIds.remove(id);
+      _savedKalaams.removeWhere((k) => k.id == id);
+    }
+    notifyListeners();
+
     try {
       final result = await ApiService.toggleSave(id);
       final saved = result['saved'] as bool;
+      final savesCount = (result['savesCount'] as num?)?.toInt();
+      final latest = _findKalaamInMemory(id);
+      if (latest != null) {
+        _applyKalaamUpdate(latest.copyWith(
+          savedByMe: saved,
+          savesCount: savesCount ?? latest.savesCount,
+        ));
+      }
       if (saved) {
         _savedIds.add(id);
-        if (source != null) {
+        final s = _findKalaamInMemory(id) ?? source;
+        if (s != null) {
           _savedKalaams.removeWhere((k) => k.id == id);
-          _savedKalaams.insert(0, source);
-          await _sync.mirrorOnlineSave(source);
+          _savedKalaams.insert(0, s);
+          await _sync.mirrorOnlineSave(s);
         }
       } else {
         _savedIds.remove(id);
@@ -470,7 +565,17 @@ class KalaamProvider extends ChangeNotifier {
       notifyListeners();
       return saved;
     } catch (e) {
-      return false;
+      // Roll back the optimistic flip so the UI stays honest.
+      if (source != null) {
+        _applyKalaamUpdate(source);
+      }
+      if (wasSaved) {
+        _savedIds.add(id);
+      } else {
+        _savedIds.remove(id);
+      }
+      notifyListeners();
+      return wasSaved;
     }
   }
 
@@ -484,8 +589,9 @@ class KalaamProvider extends ChangeNotifier {
   }
 
   /// Optimistically toggle the current user's like and reconcile with the
-  /// server. Returns the post-toggle liked state. On network failure the
-  /// optimistic update is rolled back.
+  /// server. Returns the post-toggle liked state. When offline, the flip is
+  /// stashed via OfflineSyncService and replayed on the next reconnect so
+  /// the user's intent doesn't get silently dropped.
   Future<bool> toggleLike(String id) async {
     final source = _findKalaamInMemory(id);
     if (source == null) return false;
@@ -499,10 +605,11 @@ class KalaamProvider extends ChangeNotifier {
     notifyListeners();
 
     if (!_isOnline) {
-      // Offline: roll back — likes require a round trip to be authoritative.
-      _applyKalaamUpdate(source);
-      notifyListeners();
-      return source.likedByMe;
+      // Server toggles are idempotent on user→post pairs, but the wire
+      // format is a toggle, so two queued flips cancel out. Use the
+      // queue's odd/even semantics: each stash records a single intent.
+      await _sync.stashPendingLikeToggle(id);
+      return willLike;
     }
 
     try {
@@ -513,33 +620,48 @@ class KalaamProvider extends ChangeNotifier {
       notifyListeners();
       return liked;
     } catch (_) {
-      _applyKalaamUpdate(source);
-      notifyListeners();
-      return source.likedByMe;
+      // Network failed mid-flight — keep the optimistic flip and queue the
+      // intent so the drain replays it. Server is the canonical authority,
+      // the engagement broadcast will fix the count on reconnect.
+      await _sync.stashPendingLikeToggle(id);
+      return willLike;
     }
   }
 
-  /// Records a detail-screen open. Fire-and-forget — bumps `reads` server-side
-  /// and patches every in-memory list so the UI counter feels live.
+  // Kalaams the current process has already pinged /view for. The server
+  // is idempotent per user (Kalaam.readers gates the increment), but we
+  // dedupe here too so reopening the detail screen doesn't burn requests
+  // or briefly flash an optimistic +1 the server then walks back.
+  final Set<String> _viewedThisSession = <String>{};
+
+  /// Records a detail-screen open. The server only bumps once per
+  /// authenticated user; we never apply an optimistic +1 because reopens
+  /// would otherwise show a 5→6→5 flicker as the authoritative count
+  /// reconciles. When offline we stash the intent so the first view on a
+  /// flaky connection still counts after the next sync.
   Future<void> recordView(String id) async {
-    final source = _findKalaamInMemory(id);
-    if (source == null) return;
-    // Optimistic bump so the user sees +1 immediately.
-    _applyKalaamUpdate(source.copyWith(reads: source.reads + 1));
-    notifyListeners();
-    if (!_isOnline) return;
+    if (id.isEmpty) return;
+    if (_viewedThisSession.contains(id)) return;
+    _viewedThisSession.add(id);
+    if (!_isOnline) {
+      await _sync.stashPendingView(id);
+      return;
+    }
     try {
       final result = await ApiService.recordView(id);
       final reads = (result['reads'] as num?)?.toInt();
-      if (reads != null) {
-        final latest = _findKalaamInMemory(id);
-        if (latest != null) {
-          _applyKalaamUpdate(latest.copyWith(reads: reads));
-          notifyListeners();
-        }
+      if (reads == null) return;
+      final latest = _findKalaamInMemory(id);
+      if (latest != null && latest.reads != reads) {
+        _applyKalaamUpdate(latest.copyWith(reads: reads));
+        notifyListeners();
       }
     } catch (_) {
-      // Counter is best-effort; keep the optimistic value.
+      // Counter is best-effort but we still want to count the view once
+      // the connection recovers. Drop the in-process dedupe so the next
+      // open retries, and queue an intent for the offline drain.
+      _viewedThisSession.remove(id);
+      await _sync.stashPendingView(id);
     }
   }
 
@@ -551,6 +673,16 @@ class KalaamProvider extends ChangeNotifier {
     _replaceInList(_searchResults, updated);
     _replaceInList(_savedKalaams, updated);
     _replaceInList(_myKalaams, updated);
+  }
+
+  /// Public accessor used by background sync paths (reference-audio upload
+  /// drain, etc.) that receive a server-fresh kalaam outside the normal
+  /// list-fetch flow and need to fan it into every cached list.
+  void applyServerKalaam(KalaamModel updated) {
+    _applyKalaamUpdate(updated);
+    notifyListeners();
+    unawaited(_persistMyCache());
+    unawaited(_persistFeedFirstPage());
   }
 
   Future<bool> toggleVisibility(String id) async {
@@ -574,7 +706,7 @@ class KalaamProvider extends ChangeNotifier {
     }
   }
 
-  Future<bool> addKalaam({
+  Future<KalaamModel?> addKalaam({
     required String title,
     required List<Map<String, dynamic>> content,
     required String category,
@@ -582,7 +714,7 @@ class KalaamProvider extends ChangeNotifier {
     String? poet,
     List<String> tags = const [],
   }) async {
-    if (!_isOnline) return false;
+    if (!_isOnline) return null;
     try {
       final kalaam = await ApiService.createKalaam(
         title: title,
@@ -595,9 +727,15 @@ class KalaamProvider extends ChangeNotifier {
       _myKalaams.insert(0, kalaam);
       if (isPublic) _feed.insert(0, kalaam);
       notifyListeners();
-      return true;
+      // Mirror the new row into the Isar cache. Without this, the next
+      // `loadMyKalaams` (fired by switching to the My tab) sees a fresh
+      // cache and replaces `_myKalaams` with the cached list — silently
+      // dropping the just-created kalaam.
+      unawaited(_persistMyCache());
+      if (isPublic) unawaited(_persistFeedFirstPage());
+      return kalaam;
     } catch (e) {
-      return false;
+      return null;
     }
   }
 
@@ -636,6 +774,10 @@ class KalaamProvider extends ChangeNotifier {
         _feed.removeAt(feedIdx);
       }
       notifyListeners();
+      // Mirror mutations into the Isar caches so a subsequent tab-switch
+      // doesn't clobber the in-memory list with the stale cached copy.
+      unawaited(_persistMyCache());
+      unawaited(_persistFeedFirstPage());
       return true;
     } catch (e) {
       return false;
@@ -645,6 +787,31 @@ class KalaamProvider extends ChangeNotifier {
   void _replaceInList(List<KalaamModel> list, KalaamModel updated) {
     final idx = list.indexWhere((k) => k.id == updated.id);
     if (idx != -1) list[idx] = updated;
+  }
+
+  /// Mirror the in-memory my-kalaams list into the Isar cache. Called after
+  /// every local mutation (create/update/delete) so a follow-up
+  /// `loadMyKalaams` that hits the fresh-TTL fast path doesn't replace
+  /// the in-memory list with a stale cached snapshot.
+  Future<void> _persistMyCache() async {
+    if (!IsarService.instance.isOpen) return;
+    try {
+      await _sync.replaceMyCache(_myKalaams);
+    } catch (_) {
+      // Cache mirror is best-effort; an Isar transient won't block the UI.
+    }
+  }
+
+  /// Mirror the head of the feed (page 1, top 20) into the Isar cache so
+  /// public additions/edits/deletes survive the same fresh-TTL race as
+  /// `_persistMyCache` above.
+  Future<void> _persistFeedFirstPage() async {
+    if (!IsarService.instance.isOpen) return;
+    try {
+      await _sync.writeFeedPage(1, _feed.take(20).toList());
+    } catch (_) {
+      // ditto — feed cache is a perf nicety, not a source of truth.
+    }
   }
 
   Future<bool> deleteKalaam(String id) async {
@@ -657,6 +824,8 @@ class KalaamProvider extends ChangeNotifier {
       _searchResults.removeWhere((k) => k.id == id);
       _savedIds.remove(id);
       notifyListeners();
+      unawaited(_persistMyCache());
+      unawaited(_persistFeedFirstPage());
       return true;
     } catch (e) {
       return false;
