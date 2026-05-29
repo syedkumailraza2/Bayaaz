@@ -1,3 +1,4 @@
+import Image from "next/image";
 import Link from "next/link";
 
 export default function Footer() {
@@ -6,9 +7,19 @@ export default function Footer() {
       <div className="container mx-auto max-w-[1080px] px-6 md:px-8 flex flex-col items-center gap-8">
         <Link
           href="/"
-          className="font-[family-name:var(--font-naskh)] text-[28px] font-bold text-primary"
+          className="flex items-center gap-3"
+          aria-label="BAYAAZ — home"
         >
-          BAYAAZ
+          <Image
+            src="/icon.png"
+            alt=""
+            width={40}
+            height={40}
+            className="rounded-[9px] ring-1 ring-black/5 shadow-sm"
+          />
+          <span className="font-[family-name:var(--font-naskh)] text-[28px] font-bold text-primary">
+            BAYAAZ
+          </span>
         </Link>
         <div className="flex flex-wrap items-center justify-center gap-x-8 gap-y-3 text-sm">
           <Link

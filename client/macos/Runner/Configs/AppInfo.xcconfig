@@ -8,7 +8,7 @@
 PRODUCT_NAME = bayaaz
 
 // The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = com.bayaaz.bayaaz
+PRODUCT_BUNDLE_IDENTIFIER = com.kumailrazas.bayaaz
 
 // The copyright displayed in application information
 PRODUCT_COPYRIGHT = Copyright © 2026 com.bayaaz. All rights reserved.

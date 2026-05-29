@@ -10,6 +10,24 @@ const bool kIsBeta = true;
 /// build time; this constant is only for display.
 const String kAppVersionLabel = '1.0.0-beta.1';
 
+/// Supabase project URL (e.g. https://abcdefgh.supabase.co). Override
+/// per environment via `--dart-define=SUPABASE_URL=...`.
+const String kSupabaseUrl = String.fromEnvironment(
+  'SUPABASE_URL',
+  defaultValue: 'https://YOUR_PROJECT_REF.supabase.co',
+);
+
+/// Supabase anon (publishable) key. Safe to ship in the client — it's
+/// the same key the browser SDK uses. Override per environment via
+/// `--dart-define=SUPABASE_ANON_KEY=...`.
+const String kSupabaseAnonKey = String.fromEnvironment(
+  'SUPABASE_ANON_KEY',
+  defaultValue: 'YOUR_ANON_KEY',
+);
+
+/// Name of the Storage bucket holding reference recitations.
+const String kSupabaseReferenceBucket = 'references';
+
 /// Holds the server base URL.
 ///
 /// Resolution order (first match wins):

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 2,
+  "builds": [
+    {
+      "src": "index.js",
+      "use": "@vercel/node",
+      "config": {
+        "includeFiles": [
+          "model/**",
+          "routes/**",
+          "middleware/**",
+          "services/**",
+          "socket/**"
+        ]
+      }
+    }
+  ],
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.js" }
+  ],
+  "functions": {
+    "index.js": {
+      "memory": 512,
+      "maxDuration": 30
+    }
+  }
+}

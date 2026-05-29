@@ -2,8 +2,21 @@ import type { Metadata } from "next";
 import LegalShell from "@/components/LegalShell";
 
 export const metadata: Metadata = {
-  title: "Terms & Conditions — BAYAAZ",
-  description: "The terms that govern your use of BAYAAZ.",
+  title: "Terms & Conditions",
+  description:
+    "The terms that govern your use of BAYAAZ — account, content ownership, acceptable use, and limitations.",
+  alternates: { canonical: "/terms" },
+  openGraph: {
+    title: "Terms & Conditions — BAYAAZ",
+    description: "The terms that govern your use of BAYAAZ.",
+    url: "/terms",
+    type: "article",
+  },
+  twitter: {
+    card: "summary",
+    title: "Terms & Conditions — BAYAAZ",
+    description: "The terms that govern your use of BAYAAZ.",
+  },
 };
 
 export default function TermsPage() {

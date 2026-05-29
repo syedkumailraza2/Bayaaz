@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -12,6 +13,7 @@ import '../db/isar_service.dart';
 import '../db/kalaam_reference_audio.dart';
 import '../models/kalaam_model.dart';
 import 'api_service.dart';
+import 'supabase_storage_service.dart';
 
 /// Container for a picked media file plus the extension we'll persist it
 /// under. Returned by [ReferenceAudioService.pickAudioFile] /
@@ -269,17 +271,29 @@ class ReferenceAudioService {
     if (ref == null) return null;
     final file = File(ref.localWavPath);
     if (!await file.exists()) return null;
+    final extension = p.extension(ref.localWavPath).replaceFirst('.', '');
     try {
-      final updated = await ApiService.uploadReferenceAudio(
+      // 1. Push the file bytes directly to Supabase Storage so the
+      //    Bayaaz API server doesn't need a writable filesystem (Vercel
+      //    serverless can't host uploads).
+      final uploaded = await SupabaseStorageService.instance.uploadReference(
         kalaamId: kalaamId,
-        audio: file,
+        file: file,
+        extension: extension,
+      );
+      // 2. Tell our API where the file lives so other devices opening
+      //    this kalaam can fetch it from Supabase too.
+      final updated = await ApiService.setReferenceAudio(
+        kalaamId: kalaamId,
+        url: uploaded.url,
         sourceType: ref.sourceType,
         sourceUrl: ref.sourceUrl,
         durationMs: ref.durationMs,
-        extension: p.extension(ref.localWavPath).replaceFirst('.', ''),
+        extension: extension,
       );
       return updated;
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[reference] uploadToServer failed: $e');
       return null;
     }
   }

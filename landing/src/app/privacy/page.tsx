@@ -2,8 +2,23 @@ import type { Metadata } from "next";
 import LegalShell from "@/components/LegalShell";
 
 export const metadata: Metadata = {
-  title: "Privacy Policy — BAYAAZ",
-  description: "How BAYAAZ collects, uses, and protects your information.",
+  title: "Privacy Policy",
+  description:
+    "How BAYAAZ collects, uses, and protects your information — clearly written, with offline-first guarantees and export rights.",
+  alternates: { canonical: "/privacy" },
+  openGraph: {
+    title: "Privacy Policy — BAYAAZ",
+    description:
+      "How BAYAAZ collects, uses, and protects your information.",
+    url: "/privacy",
+    type: "article",
+  },
+  twitter: {
+    card: "summary",
+    title: "Privacy Policy — BAYAAZ",
+    description:
+      "How BAYAAZ collects, uses, and protects your information.",
+  },
 };
 
 export default function PrivacyPage() {

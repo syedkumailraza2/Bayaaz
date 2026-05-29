@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -185,34 +184,32 @@ class ApiService {
   /// returned [KalaamModel] now has its `referenceAudio` field populated;
   /// callers can patch the in-memory list so other devices see it next
   /// time they refresh.
-  static Future<KalaamModel> uploadReferenceAudio({
+  /// Records a reference media URL on the server after the client has
+  /// uploaded the file to Firebase Storage. The server validates that
+  /// [url] is a Firebase Storage URL and stores it on the kalaam.
+  static Future<KalaamModel> setReferenceAudio({
     required String kalaamId,
-    required File audio,
+    required String url,
     required String sourceType,
     String? sourceUrl,
     int? durationMs,
     String? extension,
   }) async {
-    final uri = Uri.parse('$kBaseUrl/kalaams/$kalaamId/reference');
-    final headers = await _authHeaders();
-    headers.remove('Content-Type'); // multipart sets its own boundary
-    final req = http.MultipartRequest('POST', uri)
-      ..headers.addAll(headers)
-      ..fields['sourceType'] = sourceType
-      ..fields['durationMs'] = (durationMs ?? 0).toString();
-    if (sourceUrl != null && sourceUrl.isNotEmpty) {
-      req.fields['sourceUrl'] = sourceUrl;
-    }
-    if (extension != null && extension.isNotEmpty) {
-      req.fields['extension'] = extension;
-    }
-    req.files.add(await http.MultipartFile.fromPath('audio', audio.path));
-    final streamed = await req.send().timeout(const Duration(minutes: 5));
-    final res = await http.Response.fromStream(streamed);
+    final res = await http.post(
+      Uri.parse('$kBaseUrl/kalaams/$kalaamId/reference'),
+      headers: await _authHeaders(),
+      body: jsonEncode({
+        'url': url,
+        'sourceType': sourceType,
+        if (sourceUrl != null && sourceUrl.isNotEmpty) 'sourceUrl': sourceUrl,
+        'durationMs': durationMs ?? 0,
+        if (extension != null && extension.isNotEmpty) 'extension': extension,
+      }),
+    );
     if (res.statusCode == 200) {
       return KalaamModel.fromJson(jsonDecode(res.body));
     }
-    throw Exception(_parseBody(res)['message'] ?? 'Reference upload failed');
+    throw Exception(_parseBody(res)['message'] ?? 'Reference link failed');
   }
 
   /// Persists a completed practice/listen session on the server so streak,

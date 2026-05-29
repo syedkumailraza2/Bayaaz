@@ -1,54 +1,42 @@
 const express = require('express');
-const fs = require('fs');
-const path = require('path');
 const jwt = require('jsonwebtoken');
-const multer = require('multer');
 const Kalaam = require('../model/Kalaam');
 const User = require('../model/User');
 const auth = require('../middleware/auth');
 
 const router = express.Router();
 
-// ─── Reference-audio upload storage ────────────────────────────────────────
-// We persist reference recitations on the same disk the API runs on. Files
-// are written to `<repo>/server/uploads/reference/<kalaamId>.<ext>` and
-// served back via `app.use('/uploads', express.static(...))` (wired in
-// index.js). The filename uses the kalaam id so a fresh upload overwrites
-// the previous reference for that kalaam atomically.
-const REFERENCE_DIR = path.join(__dirname, '..', 'uploads', 'reference');
-fs.mkdirSync(REFERENCE_DIR, { recursive: true });
-
+// ─── Reference media ───────────────────────────────────────────────────────
+// Clients upload reference audio/video directly to Supabase Storage and
+// hand us the resulting public URL; this server never holds the bytes.
+// We validate that the URL belongs to a Supabase project so a malicious
+// client can't make us advertise an arbitrary host. Optionally tighten
+// to a specific project by setting SUPABASE_HOST=<ref>.supabase.co.
 const ALLOWED_REF_EXTS = new Set([
   'mp3', 'm4a', 'aac', 'wav', 'ogg', 'opus', 'flac',
   'mp4', 'mov', 'webm', 'mkv',
 ]);
 
-const referenceStorage = multer.diskStorage({
-  destination: (req, _file, cb) => cb(null, REFERENCE_DIR),
-  filename: (req, file, cb) => {
-    // Trust the picker-resolved extension from the client (sent as a form
-    // field) over multer's MIME guess, because Android pickers regularly
-    // ship audio with a generic `application/octet-stream` MIME.
-    let ext = String(req.body.extension || '').toLowerCase().replace(/^\./, '');
-    if (!ALLOWED_REF_EXTS.has(ext)) {
-      ext = path.extname(file.originalname || '').replace('.', '').toLowerCase();
+const SUPABASE_HOST_RE = /^[a-z0-9-]+\.supabase\.(co|in)$/;
+
+const isValidReferenceUrl = (raw) => {
+  if (typeof raw !== 'string' || !raw) return false;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'https:') return false;
+    // Path must be on the Supabase Storage object route — public URLs
+    // look like /storage/v1/object/public/<bucket>/<path>, signed URLs
+    // like /storage/v1/object/sign/...
+    if (!u.pathname.startsWith('/storage/v1/object/')) return false;
+    // If SUPABASE_HOST is set, require an exact match (single-project
+    // hardening). Otherwise allow any *.supabase.co host.
+    if (process.env.SUPABASE_HOST) {
+      return u.hostname === process.env.SUPABASE_HOST;
     }
-    if (!ALLOWED_REF_EXTS.has(ext)) ext = 'm4a';
-    cb(null, `${req.params.id}.${ext}`);
-  },
-});
-
-const referenceUpload = multer({
-  storage: referenceStorage,
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB hard cap
-});
-
-// Build the absolute URL the client should hit to fetch a reference file.
-// Honour the proxy/Cloudflare host header (we set `trust proxy: true` in
-// index.js) so the URL works in deployed environments.
-const buildReferenceUrl = (req, filename) => {
-  const base = `${req.protocol}://${req.get('host')}`;
-  return `${base}/uploads/reference/${filename}`;
+    return SUPABASE_HOST_RE.test(u.hostname);
+  } catch {
+    return false;
+  }
 };
 
 // Resolves the requesting user id from a Bearer token if one is provided,
@@ -371,15 +359,9 @@ router.delete('/:id', auth, async (req, res) => {
     if (!kalaam) return res.status(404).json({ message: 'Not found' });
     if (kalaam.author.toString() !== req.user.id) return res.status(403).json({ message: 'Forbidden' });
 
-    // Remove the on-disk reference recitation, if any, so we don't leak
-    // orphaned files into the uploads directory.
-    if (kalaam.referenceAudio?.url) {
-      const tail = kalaam.referenceAudio.url.split('/uploads/reference/')[1];
-      if (tail) {
-        const p = path.join(REFERENCE_DIR, tail);
-        fs.promises.unlink(p).catch(() => {});
-      }
-    }
+    // The reference media (if any) lives in Supabase Storage; the client
+    // is responsible for deleting the corresponding object before/after
+    // this call. We just clear the DB pointer.
     await kalaam.deleteOne();
     res.json({ message: 'Deleted' });
   } catch (err) {
@@ -387,87 +369,69 @@ router.delete('/:id', auth, async (req, res) => {
   }
 });
 
-// POST /api/kalaams/:id/reference — upload a follow-voice reference file.
-// Multipart fields:
-//   audio       — the file blob (required)
+// POST /api/kalaams/:id/reference — record a follow-voice reference URL.
+// The client uploads the file to Supabase Storage first, then calls this
+// endpoint with the resulting public URL.
+//
+// JSON body:
+//   url         — Supabase Storage public URL (required)
 //   sourceType  — 'audio_file' | 'video_file' | 'youtube'
 //   sourceUrl?  — original YouTube URL, when sourceType=='youtube'
-//   durationMs? — client-measured duration
-//   extension?  — picker-resolved extension (no leading dot)
+//   durationMs? — client-measured duration in ms
+//   extension?  — file extension without leading dot (e.g. 'm4a')
+//
 // Owner only. Returns the updated kalaam with `referenceAudio.url`.
-router.post(
-  '/:id/reference',
-  auth,
-  referenceUpload.single('audio'),
-  async (req, res) => {
-    try {
-      if (!req.file) return res.status(400).json({ message: 'No audio uploaded' });
-      const kalaam = await Kalaam.findById(req.params.id);
-      if (!kalaam) {
-        await fs.promises.unlink(req.file.path).catch(() => {});
-        return res.status(404).json({ message: 'Not found' });
-      }
-      if (kalaam.author.toString() !== req.user.id) {
-        await fs.promises.unlink(req.file.path).catch(() => {});
-        return res.status(403).json({ message: 'Forbidden' });
-      }
-
-      // Replacing an existing reference: nuke the previous file on disk if
-      // its filename differs (different extension produces a different
-      // basename and our multer storage doesn't auto-clean it up).
-      if (kalaam.referenceAudio?.url) {
-        const oldTail = kalaam.referenceAudio.url.split('/uploads/reference/')[1];
-        const newTail = path.basename(req.file.path);
-        if (oldTail && oldTail !== newTail) {
-          fs.promises.unlink(path.join(REFERENCE_DIR, oldTail)).catch(() => {});
-        }
-      }
-
-      const filename = path.basename(req.file.path);
-      const ext = path.extname(filename).replace('.', '');
-      const sourceType = ['audio_file', 'video_file', 'youtube']
-        .includes(req.body.sourceType)
-        ? req.body.sourceType
-        : 'audio_file';
-      const durationMs = Number.isFinite(parseInt(req.body.durationMs, 10))
-        ? Math.max(0, parseInt(req.body.durationMs, 10))
-        : 0;
-
-      kalaam.referenceAudio = {
-        url: buildReferenceUrl(req, filename),
-        sourceType,
-        sourceUrl: req.body.sourceUrl || null,
-        durationMs,
-        extension: ext,
-        uploadedAt: new Date(),
-      };
-      await kalaam.save();
-      await kalaam.populate('author', 'name avatar');
-
-      const savedSet = await loadSavedSet(req.user.id);
-      res.json(fmt(kalaam, req.user.id, savedSet));
-    } catch (err) {
-      if (req.file?.path) {
-        await fs.promises.unlink(req.file.path).catch(() => {});
-      }
-      res.status(500).json({ message: err.message });
+router.post('/:id/reference', auth, async (req, res) => {
+  try {
+    const { url, sourceType, sourceUrl, durationMs, extension } = req.body || {};
+    if (!isValidReferenceUrl(url)) {
+      return res
+        .status(400)
+        .json({ message: 'Invalid reference URL — must be a Supabase Storage HTTPS URL' });
     }
-  },
-);
 
-// DELETE /api/kalaams/:id/reference — remove the follow-voice reference.
+    const kalaam = await Kalaam.findById(req.params.id);
+    if (!kalaam) return res.status(404).json({ message: 'Not found' });
+    if (kalaam.author.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+
+    const safeSourceType = ['audio_file', 'video_file', 'youtube'].includes(sourceType)
+      ? sourceType
+      : 'audio_file';
+    const safeDuration = Number.isFinite(parseInt(durationMs, 10))
+      ? Math.max(0, parseInt(durationMs, 10))
+      : 0;
+    let safeExt = String(extension || '').toLowerCase().replace(/^\./, '');
+    if (!ALLOWED_REF_EXTS.has(safeExt)) safeExt = 'm4a';
+
+    kalaam.referenceAudio = {
+      url,
+      sourceType: safeSourceType,
+      sourceUrl: sourceUrl || null,
+      durationMs: safeDuration,
+      extension: safeExt,
+      uploadedAt: new Date(),
+    };
+    await kalaam.save();
+    await kalaam.populate('author', 'name avatar');
+
+    const savedSet = await loadSavedSet(req.user.id);
+    res.json(fmt(kalaam, req.user.id, savedSet));
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// DELETE /api/kalaams/:id/reference — clear the follow-voice reference pointer.
+// The client is responsible for deleting the corresponding Supabase Storage
+// object; this endpoint only updates the DB.
 router.delete('/:id/reference', auth, async (req, res) => {
   try {
     const kalaam = await Kalaam.findById(req.params.id);
     if (!kalaam) return res.status(404).json({ message: 'Not found' });
     if (kalaam.author.toString() !== req.user.id) {
       return res.status(403).json({ message: 'Forbidden' });
-    }
-    if (kalaam.referenceAudio?.url) {
-      const tail = kalaam.referenceAudio.url.split('/uploads/reference/')[1];
-      if (tail) {
-        fs.promises.unlink(path.join(REFERENCE_DIR, tail)).catch(() => {});
-      }
     }
     kalaam.referenceAudio = null;
     await kalaam.save();

@@ -16,48 +16,59 @@ const sttRoutes = require('./routes/stt');
 const practiceRoutes = require('./routes/practice');
 const attachSessionHandlers = require('./socket/sessionNamespace');
 
+// `VERCEL` is set automatically by Vercel's serverless runtime.
+// On Vercel:
+//   - long-lived sockets and setInterval don't work; we skip them.
+//   - `app.listen()` is not called; Vercel wraps the exported app.
+//   - Mongo connects lazily and is cached on the module so subsequent
+//     warm invocations reuse the same client.
+const isServerless = !!process.env.VERCEL;
+
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] },
-});
 
-// Redis pub/sub adapter — lets Socket.IO broadcast across multiple Node
-// instances. Optional: if REDIS_URL is unset and the local Redis isn't
-// reachable, we fall back silently to in-memory broadcasting.
-(async function attachRedisAdapter() {
-  const url = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
-  try {
-    const pubClient = createClient({ url });
-    const subClient = pubClient.duplicate();
-    pubClient.on('error', (err) => console.error('[redis pub] error:', err.message));
-    subClient.on('error', (err) => console.error('[redis sub] error:', err.message));
-    await Promise.all([pubClient.connect(), subClient.connect()]);
-    io.adapter(createAdapter(pubClient, subClient));
-    console.log(`Socket.IO Redis adapter attached (${url})`);
-  } catch (err) {
-    console.warn('Redis adapter not attached, falling back to in-memory:', err.message);
-  }
-})();
-
-// Make io accessible in route handlers via req.app.get('io')
-app.set('io', io);
-
-// Trust the Cloudflare/ngrok proxy so req.protocol and req.get('host')
+// Trust the Cloudflare/Vercel/ngrok proxy so req.protocol and req.get('host')
 // reflect the public URL when building outbound links.
 app.set('trust proxy', true);
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
-// Serve uploaded reference recitations. The kalaam route writes files to
-// `<server>/uploads/reference/<kalaamId>.<ext>` and stores an absolute URL
-// referencing this static mount on the Kalaam doc.
-const path = require('path');
-app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
-  maxAge: '7d',
-  fallthrough: false,
-}));
+// ─── Socket.IO ─────────────────────────────────────────────────────────────
+// Only attach Socket.IO when we run as a long-lived process. Vercel's
+// serverless model doesn't hold WebSocket connections, so realtime
+// features (majlis sync, voice follow) must be hosted elsewhere (Render,
+// Railway, Fly, a self-hosted box). The REST endpoints below work on
+// either deployment target.
+let server;
+let io;
+if (!isServerless) {
+  server = http.createServer(app);
+  io = new Server(server, {
+    cors: { origin: '*', methods: ['GET', 'POST'] },
+  });
+
+  // Redis pub/sub adapter — lets Socket.IO broadcast across multiple Node
+  // instances. Optional: if REDIS_URL is unset and the local Redis isn't
+  // reachable, we fall back silently to in-memory broadcasting.
+  (async function attachRedisAdapter() {
+    const url = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+    try {
+      const pubClient = createClient({ url });
+      const subClient = pubClient.duplicate();
+      pubClient.on('error', (err) => console.error('[redis pub] error:', err.message));
+      subClient.on('error', (err) => console.error('[redis sub] error:', err.message));
+      await Promise.all([pubClient.connect(), subClient.connect()]);
+      io.adapter(createAdapter(pubClient, subClient));
+      console.log(`Socket.IO Redis adapter attached (${url})`);
+    } catch (err) {
+      console.warn('Redis adapter not attached, falling back to in-memory:', err.message);
+    }
+  })();
+
+  // Make io accessible in route handlers via req.app.get('io')
+  app.set('io', io);
+  attachSessionHandlers(io);
+}
 
 app.use('/api/auth', authRoutes);
 app.use('/api/kalaams', kalaamRoutes);
@@ -68,22 +79,6 @@ app.use('/api/stt', sttRoutes);
 app.use('/api/practice', practiceRoutes);
 
 app.get('/health', (_, res) => res.json({ status: 'ok' }));
-
-// Render free tier spins services down after ~15 min idle; the first cold
-// request takes 30-50s. Self-ping /health every 5 min to keep the dyno warm.
-// On Render, RENDER_EXTERNAL_URL is auto-injected; locally we ping loopback
-// (harmless, just exercises the route).
-const keepAliveUrl =
-  process.env.RENDER_EXTERNAL_URL ||
-  `http://127.0.0.1:${process.env.PORT || 5000}`;
-setInterval(async () => {
-  try {
-    const res = await fetch(`${keepAliveUrl}/health`);
-    if (!res.ok) console.warn('[keep-alive] non-ok response:', res.status);
-  } catch (err) {
-    console.error('[keep-alive] ping failed:', err.message);
-  }
-}, 5 * 60 * 1000);
 
 // Invite landing page — WhatsApp and most chat apps only linkify http(s) URLs,
 // so we hand out an https URL that bounces to the bayaaz:// custom scheme.
@@ -111,17 +106,68 @@ app.get('/i/:token', (req, res) => {
 </html>`);
 });
 
-attachSessionHandlers(io);
+// ─── Mongo ─────────────────────────────────────────────────────────────────
+// Cache the connection promise on the module so serverless cold starts
+// re-use the same TCP pool across invocations.
+let mongoPromise = null;
+function connectMongo() {
+  if (!mongoPromise) {
+    mongoPromise = mongoose
+      .connect(process.env.MONGO_URI, {
+        serverSelectionTimeoutMS: 8000,
+      })
+      .then((m) => {
+        console.log('MongoDB connected');
+        return m;
+      })
+      .catch((err) => {
+        // Reset so the next request retries — important on serverless.
+        mongoPromise = null;
+        throw err;
+      });
+  }
+  return mongoPromise;
+}
 
-mongoose
-  .connect(process.env.MONGO_URI)
-  .then(() => {
-    console.log('MongoDB connected');
-    server.listen(process.env.PORT || 5000, () =>
-      console.log(`Server running on port ${process.env.PORT || 5000}`)
-    );
-  })
-  .catch((err) => {
-    console.error('MongoDB connection error:', err);
-    process.exit(1);
-  });
+// Ensure every API request waits for Mongo before reaching the routes.
+app.use(async (req, res, next) => {
+  try {
+    await connectMongo();
+    next();
+  } catch (err) {
+    console.error('MongoDB connection error:', err.message);
+    res.status(503).json({ message: 'Database unavailable' });
+  }
+});
+
+if (!isServerless) {
+  // Local / long-lived host: start the HTTP server.
+  connectMongo()
+    .then(() => {
+      server.listen(process.env.PORT || 5000, () =>
+        console.log(`Server running on port ${process.env.PORT || 5000}`)
+      );
+    })
+    .catch((err) => {
+      console.error('MongoDB connection error:', err);
+      process.exit(1);
+    });
+
+  // Render's free tier spins services down after ~15 min idle; the first
+  // cold request takes 30-50s. Self-ping /health every 5 min to keep
+  // the dyno warm. We only run this on long-lived hosts because Vercel
+  // serverless invocations are short-lived and the timer would never tick.
+  const keepAliveUrl =
+    process.env.RENDER_EXTERNAL_URL ||
+    `http://127.0.0.1:${process.env.PORT || 5000}`;
+  setInterval(async () => {
+    try {
+      const res = await fetch(`${keepAliveUrl}/health`);
+      if (!res.ok) console.warn('[keep-alive] non-ok response:', res.status);
+    } catch (err) {
+      console.error('[keep-alive] ping failed:', err.message);
+    }
+  }, 5 * 60 * 1000);
+}
+
+module.exports = app;

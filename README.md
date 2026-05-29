@@ -77,6 +77,30 @@ npm install
 npm run dev                # http://localhost:4000
 ```
 
+The server does not hold uploaded files — reference audio/video is
+uploaded by the client directly to Firebase Storage, and the server
+just records the resulting download URL. This makes the API
+serverless-friendly (see Vercel section below).
+
+#### Deploying the server to Vercel
+
+```bash
+cd server
+vercel              # link the project, set env vars (MONGO_URI, JWT_SECRET, GOOGLE_CLIENT_ID)
+vercel --prod       # deploy
+```
+
+`server/vercel.json` routes every request to `index.js`, which exports
+the Express `app`. The Mongo connection is cached on the module across
+warm invocations.
+
+**Important — Socket.io does not work on Vercel.** Vercel's serverless
+functions are short-lived and can't hold WebSocket connections, so the
+realtime majlis sync and voice-follow features will silently break if
+the API runs only on Vercel. For realtime, host this same codebase on
+Render, Railway, or Fly.io — `process.env.VERCEL` gates the Socket.io
+setup so the same code works on both targets.
+
 ### 2. Whisper / Vosk service (`whisper-service/`)
 
 ```bash
@@ -95,10 +119,50 @@ python vosk_service.py     # ws://localhost:2700
 ```bash
 cd client
 flutter pub get
-flutter run                # iOS simulator or Android emulator
+flutter run \
+  --dart-define=SUPABASE_URL=https://<your-project-ref>.supabase.co \
+  --dart-define=SUPABASE_ANON_KEY=<your-anon-key>
 ```
 
-Override the server URL at runtime via the in-app developer dialog (long-press the splash) if you aren't pointing at `localhost`.
+Override the server URL at runtime via the in-app developer dialog
+(long-press the splash) if you aren't pointing at `localhost`. The
+Supabase URL and anon key are the only build-time secrets — both are
+safe to ship in the client binary (the anon key is the same one a
+browser SDK would use; row-level security in Supabase is what actually
+gates writes).
+
+#### Supabase Storage setup
+
+Reference audio/video uploads are streamed directly to Supabase
+Storage from the device — the API server never holds the bytes.
+
+1. Create a free Supabase project at <https://supabase.com>.
+2. **Storage → New bucket**: name it `references`, mark it **public**
+   (read-only public, so other devices can play a reference off its
+   URL without auth).
+3. Open **Storage → Policies → references** and add an `INSERT`
+   policy so only signed-in users can upload. SQL:
+
+   ```sql
+   create policy "Authenticated uploads"
+     on storage.objects for insert to authenticated
+     with check (
+       bucket_id = 'references'
+       and (storage.foldername(name))[1] is not null
+     );
+
+   create policy "Authenticated deletes"
+     on storage.objects for delete to authenticated
+     using (bucket_id = 'references');
+   ```
+
+4. Grab the **Project URL** and **anon (public) key** from
+   Project Settings → API. Pass them at build time via
+   `--dart-define=SUPABASE_URL=…` and `--dart-define=SUPABASE_ANON_KEY=…`.
+5. (Optional) On the API server, set `SUPABASE_HOST=<ref>.supabase.co`
+   so the server only accepts reference URLs from your specific
+   Supabase project. Without it the server accepts any `*.supabase.co`
+   storage URL.
 
 ### 4. Landing site (`landing/`)
 
