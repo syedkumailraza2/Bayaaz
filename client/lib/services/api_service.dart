@@ -212,6 +212,32 @@ class ApiService {
     throw Exception(_parseBody(res)['message'] ?? 'Reference link failed');
   }
 
+  /// Asks the server for a short-lived presigned R2 PUT URL the client can
+  /// upload the reference file bytes to directly. R2 credentials never leave
+  /// the server. Returns the upload URL, the final public URL the file will
+  /// be served from, and the exact `Content-Type` the client MUST set on the
+  /// PUT (S3 signatures bind the header).
+  static Future<({String uploadUrl, String publicUrl, String contentType})>
+      presignReferenceUpload({
+    required String kalaamId,
+    required String extension,
+  }) async {
+    final res = await http.post(
+      Uri.parse('$kBaseUrl/kalaams/$kalaamId/reference/presign'),
+      headers: await _authHeaders(),
+      body: jsonEncode({'extension': extension}),
+    );
+    if (res.statusCode == 200) {
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      return (
+        uploadUrl: body['uploadUrl'] as String,
+        publicUrl: body['publicUrl'] as String,
+        contentType: body['contentType'] as String,
+      );
+    }
+    throw Exception(_parseBody(res)['message'] ?? 'Presign failed');
+  }
+
   /// Persists a completed practice/listen session on the server so streak,
   /// best-score, and history survive a reinstall or move to a new device.
   /// [clientToken] makes the call idempotent — the server returns the same

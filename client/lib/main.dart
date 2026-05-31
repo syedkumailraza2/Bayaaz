@@ -29,17 +29,9 @@ import 'services/llm_service.dart';
 import 'services/offline_sync_service.dart';
 import 'services/pack_manager.dart';
 import 'services/warmup_service.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Supabase has to come up before anything that uses Storage (reference
-  // audio upload). The URL + anon key are public — override per-environment
-  // via `--dart-define=SUPABASE_URL=... --dart-define=SUPABASE_ANON_KEY=...`.
-  await Supabase.initialize(
-    url: kSupabaseUrl,
-    anonKey: kSupabaseAnonKey,
-  );
   await AppConfig.init();
   // Detect device tier once at startup so all downstream services can use it
   // synchronously via DeviceCapabilityService.instance.tier.

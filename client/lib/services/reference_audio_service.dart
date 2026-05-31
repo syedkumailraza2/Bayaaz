@@ -13,7 +13,7 @@ import '../db/isar_service.dart';
 import '../db/kalaam_reference_audio.dart';
 import '../models/kalaam_model.dart';
 import 'api_service.dart';
-import 'supabase_storage_service.dart';
+import 'r2_storage_service.dart';
 
 /// Container for a picked media file plus the extension we'll persist it
 /// under. Returned by [ReferenceAudioService.pickAudioFile] /
@@ -65,9 +65,15 @@ class ReferenceAudioService {
     return PickedMedia(file: File(path), extension: ext);
   }
 
-  /// Downloads the audio stream from a YouTube URL to a temp file.
-  /// Returns the file and duration from video metadata (no extra probe needed).
-  Future<({File file, int durationMs})?> fetchYouTubeAudio(
+  /// Downloads the audio for a YouTube URL into a temp file.
+  ///
+  /// Strategy: try audio-only first (typically 5–10× smaller than muxed mp4)
+  /// to save user bandwidth and R2 upload time. If YouTube rejects the
+  /// audio-only stream with 403 (its anti-bot path throttles audioOnly URLs
+  /// more aggressively than muxed), fall back to the lowest-bitrate muxed
+  /// mp4. The 200 MB sanity guard in [uploadToServer] then surfaces a clear
+  /// error if a fallback muxed file is unexpectedly huge.
+  Future<({File file, int durationMs, String extension})?> fetchYouTubeAudio(
     String url, {
     void Function(double progress)? onProgress,
     void Function(String status)? onStatus,
@@ -81,43 +87,85 @@ class ReferenceAudioService {
       final manifest = await yt.videos.streamsClient
           .getManifest(videoId)
           .timeout(const Duration(seconds: 30));
-      // Use the lowest-bitrate muxed (mp4) stream — muxed streams are served
-      // via standard CDN and not subject to the throttling that hits audioOnly.
-      // audioplayers' native decoder plays the audio track from mp4 directly,
-      // so no FFmpeg extraction step is needed.
+
+      // Build the candidate list: audio-only mp4 first (small + best codec),
+      // audio-only webm second (small but opus), muxed mp4 last (large but
+      // most reliable against YouTube throttling).
+      final audioOnly = manifest.audioOnly.toList()
+        ..sort((a, b) =>
+            a.bitrate.bitsPerSecond.compareTo(b.bitrate.bitsPerSecond));
       final muxed = manifest.muxed.toList()
         ..sort((a, b) =>
             a.bitrate.bitsPerSecond.compareTo(b.bitrate.bitsPerSecond));
-      if (muxed.isEmpty) throw Exception('No streams available');
-      final streamInfo = muxed.first; // lowest bitrate = smallest file
-      final totalBytes = streamInfo.size.totalBytes;
-      final dir = await getTemporaryDirectory();
-      final file = File('${dir.path}/yt_audio_temp.mp4');
-      final sink = file.openWrite();
-      int received = 0;
-      onStatus?.call('Opening stream…');
-      final request = http.Request('GET', streamInfo.url)
-        ..headers['User-Agent'] =
-            'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip'
-        ..headers['Referer'] = 'https://www.youtube.com/';
-      final response = await httpClient
-          .send(request)
-          .timeout(const Duration(seconds: 15));
-      if (response.statusCode != 200) {
-        throw Exception('HTTP ${response.statusCode}');
+      final candidates = <({dynamic info, String ext})>[];
+      for (final s in audioOnly) {
+        final isMp4 = s.container.name.toLowerCase() == 'mp4';
+        candidates.add((info: s, ext: isMp4 ? 'm4a' : 'webm'));
       }
-      onStatus?.call('Downloading…');
-      await response.stream.map((chunk) {
-        received += chunk.length;
-        final p = totalBytes > 0 ? received / totalBytes : -1.0;
-        onProgress?.call(p);
-        return chunk;
-      }).pipe(sink);
-      final durationMs =
-          totalBytes > 0 && streamInfo.bitrate.bitsPerSecond > 0
-              ? (totalBytes * 8000 / streamInfo.bitrate.bitsPerSecond).round()
+      // Sort so mp4-audio comes first, then webm-audio, then muxed mp4 below.
+      candidates.sort((a, b) {
+        final am = a.ext == 'm4a' ? 0 : 1;
+        final bm = b.ext == 'm4a' ? 0 : 1;
+        return am.compareTo(bm);
+      });
+      for (final s in muxed) {
+        candidates.add((info: s, ext: 'mp4'));
+      }
+      if (candidates.isEmpty) {
+        throw Exception('No streams available');
+      }
+
+      final dir = await getTemporaryDirectory();
+      Object? lastError;
+      for (var i = 0; i < candidates.length; i++) {
+        final c = candidates[i];
+        final streamInfo = c.info;
+        final extension = c.ext;
+        final totalBytes = streamInfo.size.totalBytes as int;
+        final file = File('${dir.path}/yt_audio_temp.$extension');
+        if (await file.exists()) {
+          try {
+            await file.delete();
+          } catch (_) {/* best-effort */}
+        }
+        final sink = file.openWrite();
+        int received = 0;
+        onStatus?.call(i == 0 ? 'Opening stream…' : 'Retrying with fallback…');
+        try {
+          final request = http.Request('GET', streamInfo.url as Uri)
+            ..headers['User-Agent'] =
+                'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip'
+            ..headers['Referer'] = 'https://www.youtube.com/';
+          final response = await httpClient
+              .send(request)
+              .timeout(const Duration(seconds: 15));
+          if (response.statusCode != 200) {
+            await sink.close();
+            throw Exception('HTTP ${response.statusCode}');
+          }
+          onStatus?.call('Downloading…');
+          await response.stream.map((chunk) {
+            received += chunk.length;
+            final p = totalBytes > 0 ? received / totalBytes : -1.0;
+            onProgress?.call(p);
+            return chunk;
+          }).pipe(sink);
+          final bps = streamInfo.bitrate.bitsPerSecond as int;
+          final durationMs = totalBytes > 0 && bps > 0
+              ? (totalBytes * 8000 / bps).round()
               : 0;
-      return (file: file, durationMs: durationMs);
+          return (file: file, durationMs: durationMs, extension: extension);
+        } catch (e) {
+          lastError = e;
+          debugPrint('[reference] yt stream attempt ${i + 1}/${candidates.length} '
+              '($extension) failed: $e');
+          try {
+            await sink.close();
+          } catch (_) {/* already closed */}
+          // Try the next candidate (audio-only webm → muxed mp4 → …).
+        }
+      }
+      throw lastError ?? Exception('All YouTube streams failed');
     } finally {
       yt.close();
       httpClient.close();
@@ -261,6 +309,13 @@ class ReferenceAudioService {
         () => db.kalaamReferenceAudios.deleteByKalaamId(kalaamId));
   }
 
+  /// Last error string from [uploadToServer]. Set when the R2 upload or
+  /// `setReferenceAudio` call throws; cleared on the next successful run.
+  /// Callers can read this to surface a user-visible toast — the upload
+  /// itself is fire-and-forget so the original call site can't await the
+  /// exception directly.
+  String? lastUploadError;
+
   /// Uploads the locally-cached reference for [kalaamId] to the server so
   /// other devices opening this kalaam can follow-voice off it too. Returns
   /// the server's updated [KalaamModel] (with `referenceAudio` populated) so
@@ -268,21 +323,42 @@ class ReferenceAudioService {
   /// nothing to upload or the network call fails.
   Future<KalaamModel?> uploadToServer(String kalaamId) async {
     final ref = await getReference(kalaamId);
-    if (ref == null) return null;
+    if (ref == null) {
+      lastUploadError = 'no local reference record for $kalaamId';
+      debugPrint('[reference] uploadToServer skipped: ${lastUploadError!}');
+      return null;
+    }
     final file = File(ref.localWavPath);
-    if (!await file.exists()) return null;
+    if (!await file.exists()) {
+      lastUploadError = 'local file missing: ${ref.localWavPath}';
+      debugPrint('[reference] uploadToServer skipped: ${lastUploadError!}');
+      return null;
+    }
+    // R2 single-PUT supports up to 5 GB, but uploading a multi-GB blob over
+    // mobile data is a footgun for the user. A 200 MB sanity cap stops
+    // accidental video-with-no-audio-only-fallback cases without restricting
+    // realistic kalaam references (audio-only is usually 5–15 MB).
+    const maxUploadBytes = 200 * 1024 * 1024;
+    final fileBytes = await file.length();
+    if (fileBytes > maxUploadBytes) {
+      final mb = (fileBytes / (1024 * 1024)).toStringAsFixed(1);
+      lastUploadError =
+          'reference is $mb MB; max upload is 200 MB. Pick a shorter clip or compress before saving.';
+      debugPrint('[reference] uploadToServer skipped: ${lastUploadError!}');
+      return null;
+    }
     final extension = p.extension(ref.localWavPath).replaceFirst('.', '');
     try {
-      // 1. Push the file bytes directly to Supabase Storage so the
-      //    Bayaaz API server doesn't need a writable filesystem (Vercel
-      //    serverless can't host uploads).
-      final uploaded = await SupabaseStorageService.instance.uploadReference(
+      // 1. Push the file bytes to R2 via a server-issued presigned PUT URL
+      //    so the Bayaaz API server doesn't need a writable filesystem and
+      //    R2 credentials never leave the server.
+      final uploaded = await R2StorageService.instance.uploadReference(
         kalaamId: kalaamId,
         file: file,
         extension: extension,
       );
       // 2. Tell our API where the file lives so other devices opening
-      //    this kalaam can fetch it from Supabase too.
+      //    this kalaam can fetch it from R2 too.
       final updated = await ApiService.setReferenceAudio(
         kalaamId: kalaamId,
         url: uploaded.url,
@@ -291,9 +367,12 @@ class ReferenceAudioService {
         durationMs: ref.durationMs,
         extension: extension,
       );
+      lastUploadError = null;
       return updated;
-    } catch (e) {
-      debugPrint('[reference] uploadToServer failed: $e');
+    } catch (e, st) {
+      lastUploadError = '${e.runtimeType}: $e';
+      debugPrint('[reference] uploadToServer failed: ${lastUploadError!}');
+      debugPrint('[reference] stack: $st');
       return null;
     }
   }

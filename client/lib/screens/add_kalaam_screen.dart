@@ -273,11 +273,10 @@ class _AddKalaamScreenState extends State<AddKalaamScreen>
             realId: realId,
           );
         }
-        // Push the local file up to the server so anyone else opening this
-        // kalaam on another device can fetch and follow-voice off it.
-        // Fire-and-forget: failure (offline / 5xx) doesn't block the save —
-        // OfflineSyncService will retry on the next reconnect.
-        unawaited(_syncReferenceUp(realId, provider));
+        // Push the local file up via a modal progress dialog so the user sees
+        // an "Uploading…" spinner and any error message — never an indefinite
+        // hang. A 60s timeout guards against stalled connections.
+        await _syncReferenceUpInteractive(realId, provider);
       }
       if (!mounted) return;
       _showSnack(_isEditing ? 'Kalaam updated' : 'Kalaam created');
@@ -287,19 +286,65 @@ class _AddKalaamScreenState extends State<AddKalaamScreen>
     }
   }
 
-  Future<void> _syncReferenceUp(
+  Future<void> _syncReferenceUpInteractive(
     String kalaamId,
     KalaamProvider provider,
   ) async {
-    final updated =
-        await ReferenceAudioService.instance.uploadToServer(kalaamId);
-    if (updated == null) {
-      // Couldn't push right now (likely offline). Queue it so the offline
-      // sync drain retries when the app comes back online.
-      await OfflineSyncService.instance.stashPendingReferenceUpload(kalaamId);
+    // Show a non-dismissible progress dialog while the upload runs. The
+    // dialog is popped from inside the future so the screen flow is
+    // dialog → success snack → screen pop, or dialog → error dialog → stay.
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 16),
+            Expanded(child: Text('Uploading reference…')),
+          ],
+        ),
+      ),
+    );
+
+    KalaamModel? updated;
+    Object? error;
+    try {
+      updated = await ReferenceAudioService.instance
+          .uploadToServer(kalaamId)
+          .timeout(const Duration(seconds: 60));
+    } catch (e) {
+      error = e;
+    }
+
+    if (mounted) Navigator.of(context, rootNavigator: true).pop();
+
+    if (updated != null) {
+      provider.applyServerKalaam(updated);
       return;
     }
-    provider.applyServerKalaam(updated);
+
+    // Upload failed or timed out — queue for offline retry AND surface a
+    // visible error dialog with the real exception text so the user can
+    // tell us what's wrong instead of guessing.
+    await OfflineSyncService.instance.stashPendingReferenceUpload(kalaamId);
+    final detail = error?.toString() ??
+        ReferenceAudioService.instance.lastUploadError ??
+        'unknown error';
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Reference upload failed'),
+        content: SingleChildScrollView(child: Text(detail)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
   }
 
   void _showSnack(String message, {bool isError = false}) {
@@ -1148,7 +1193,11 @@ class _ReferenceMediaSectionState extends State<_ReferenceMediaSection> {
       if (result == null) throw Exception('Invalid URL');
       setState(() { _downloadProgress = null; _isConnecting = false; });
       final svc = ReferenceAudioService.instance;
-      final filePath = await svc.extractAndNormalize(result.file, widget.tempId);
+      final filePath = await svc.extractAndNormalize(
+        result.file,
+        widget.tempId,
+        extension: result.extension,
+      );
       final durationMs = result.durationMs > 0
           ? result.durationMs
           : await svc.getFileDurationMs(filePath);
@@ -1165,12 +1214,18 @@ class _ReferenceMediaSectionState extends State<_ReferenceMediaSection> {
         _duration = _formatDuration(durationMs);
       });
       widget.onStateChanged(true);
-    } catch (_) {
+    } catch (e, st) {
+      // Include the underlying exception so we can tell *why* the fetch
+      // failed — youtube_explode_dart breaks every few months when YouTube
+      // changes internals, network issues look identical to bad URLs from
+      // a generic "Check the URL" message, etc.
+      debugPrint('[reference] youtube fetch failed: $e');
+      debugPrint('[reference] stack: $st');
       setState(() {
         _state = _RefState.error;
         _downloadProgress = null;
         _isConnecting = false;
-        _error = 'Could not fetch YouTube audio. Check the URL.';
+        _error = 'Could not fetch YouTube audio: $e';
       });
       widget.onStateChanged(false);
     }

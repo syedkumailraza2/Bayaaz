@@ -3,41 +3,22 @@ const jwt = require('jsonwebtoken');
 const Kalaam = require('../model/Kalaam');
 const User = require('../model/User');
 const auth = require('../middleware/auth');
+const r2 = require('../services/r2');
 
 const router = express.Router();
 
 // ─── Reference media ───────────────────────────────────────────────────────
-// Clients upload reference audio/video directly to Supabase Storage and
-// hand us the resulting public URL; this server never holds the bytes.
-// We validate that the URL belongs to a Supabase project so a malicious
-// client can't make us advertise an arbitrary host. Optionally tighten
-// to a specific project by setting SUPABASE_HOST=<ref>.supabase.co.
-const ALLOWED_REF_EXTS = new Set([
-  'mp3', 'm4a', 'aac', 'wav', 'ogg', 'opus', 'flac',
-  'mp4', 'mov', 'webm', 'mkv',
-]);
+// Reference audio/video lives in Cloudflare R2. The upload flow:
+//   1. Client POSTs `/kalaams/:id/reference/presign` with `extension`.
+//   2. Server returns a 10-minute presigned PUT URL and the final public URL.
+//   3. Client PUTs file bytes directly to R2 over that URL.
+//   4. Client POSTs `/kalaams/:id/reference` with the public URL to persist.
+// We validate that the URL belongs to our configured R2 public base
+// (`R2_PUBLIC_BASE_URL`) so a malicious client can't make us advertise an
+// arbitrary host.
+const ALLOWED_REF_EXTS = r2.ALLOWED_EXTS;
 
-const SUPABASE_HOST_RE = /^[a-z0-9-]+\.supabase\.(co|in)$/;
-
-const isValidReferenceUrl = (raw) => {
-  if (typeof raw !== 'string' || !raw) return false;
-  try {
-    const u = new URL(raw);
-    if (u.protocol !== 'https:') return false;
-    // Path must be on the Supabase Storage object route — public URLs
-    // look like /storage/v1/object/public/<bucket>/<path>, signed URLs
-    // like /storage/v1/object/sign/...
-    if (!u.pathname.startsWith('/storage/v1/object/')) return false;
-    // If SUPABASE_HOST is set, require an exact match (single-project
-    // hardening). Otherwise allow any *.supabase.co host.
-    if (process.env.SUPABASE_HOST) {
-      return u.hostname === process.env.SUPABASE_HOST;
-    }
-    return SUPABASE_HOST_RE.test(u.hostname);
-  } catch {
-    return false;
-  }
-};
+const isValidReferenceUrl = (raw) => r2.isManagedPublicUrl(raw);
 
 // Resolves the requesting user id from a Bearer token if one is provided,
 // otherwise returns null. Used by public endpoints so we can still compute
@@ -369,12 +350,41 @@ router.delete('/:id', auth, async (req, res) => {
   }
 });
 
-// POST /api/kalaams/:id/reference — record a follow-voice reference URL.
-// The client uploads the file to Supabase Storage first, then calls this
-// endpoint with the resulting public URL.
+// POST /api/kalaams/:id/reference/presign — issue a short-lived signed URL
+// the client can PUT the reference file bytes to directly on R2. R2 keys
+// stay on the server.
 //
 // JSON body:
-//   url         — Supabase Storage public URL (required)
+//   extension — file extension without leading dot ('m4a', 'mp4', etc.)
+//
+// Owner only. Returns `{ uploadUrl, publicUrl, key, contentType, expiresInSec }`.
+// The client must PUT with `Content-Type: <contentType>` exactly, otherwise
+// S3 rejects the signature.
+router.post('/:id/reference/presign', auth, async (req, res) => {
+  try {
+    const { extension } = req.body || {};
+    const kalaam = await Kalaam.findById(req.params.id);
+    if (!kalaam) return res.status(404).json({ message: 'Not found' });
+    if (kalaam.author.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+    const presign = await r2.presignReferenceUpload({
+      kalaamId: req.params.id,
+      extension,
+    });
+    res.json(presign);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// POST /api/kalaams/:id/reference — record a follow-voice reference URL.
+// The client uploads the file to R2 (via the presigned URL from the
+// `/presign` endpoint) first, then calls this endpoint with the resulting
+// public URL.
+//
+// JSON body:
+//   url         — R2 public URL (required, must match R2_PUBLIC_BASE_URL host)
 //   sourceType  — 'audio_file' | 'video_file' | 'youtube'
 //   sourceUrl?  — original YouTube URL, when sourceType=='youtube'
 //   durationMs? — client-measured duration in ms
@@ -387,7 +397,7 @@ router.post('/:id/reference', auth, async (req, res) => {
     if (!isValidReferenceUrl(url)) {
       return res
         .status(400)
-        .json({ message: 'Invalid reference URL — must be a Supabase Storage HTTPS URL' });
+        .json({ message: 'Invalid reference URL — must be on the configured R2 public host' });
     }
 
     const kalaam = await Kalaam.findById(req.params.id);
@@ -423,9 +433,10 @@ router.post('/:id/reference', auth, async (req, res) => {
   }
 });
 
-// DELETE /api/kalaams/:id/reference — clear the follow-voice reference pointer.
-// The client is responsible for deleting the corresponding Supabase Storage
-// object; this endpoint only updates the DB.
+// DELETE /api/kalaams/:id/reference — clear the follow-voice reference pointer
+// and delete the corresponding R2 object best-effort. R2 cleanup failures
+// don't fail the request — the DB pointer is the source of truth, an
+// orphaned object is a minor cost issue, not a correctness one.
 router.delete('/:id/reference', auth, async (req, res) => {
   try {
     const kalaam = await Kalaam.findById(req.params.id);
@@ -433,8 +444,14 @@ router.delete('/:id/reference', auth, async (req, res) => {
     if (kalaam.author.toString() !== req.user.id) {
       return res.status(403).json({ message: 'Forbidden' });
     }
+    const previousUrl = kalaam.referenceAudio && kalaam.referenceAudio.url;
     kalaam.referenceAudio = null;
     await kalaam.save();
+    if (previousUrl) {
+      r2.deleteByPublicUrl(previousUrl).catch((err) => {
+        console.warn('[r2] delete failed for', previousUrl, err.message);
+      });
+    }
     await kalaam.populate('author', 'name avatar');
     const savedSet = await loadSavedSet(req.user.id);
     res.json(fmt(kalaam, req.user.id, savedSet));
