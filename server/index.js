@@ -48,22 +48,28 @@ if (!isServerless) {
   });
 
   // Redis pub/sub adapter — lets Socket.IO broadcast across multiple Node
-  // instances. Optional: if REDIS_URL is unset and the local Redis isn't
-  // reachable, we fall back silently to in-memory broadcasting.
-  (async function attachRedisAdapter() {
-    const url = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
-    try {
-      const pubClient = createClient({ url });
-      const subClient = pubClient.duplicate();
-      pubClient.on('error', (err) => console.error('[redis pub] error:', err.message));
-      subClient.on('error', (err) => console.error('[redis sub] error:', err.message));
-      await Promise.all([pubClient.connect(), subClient.connect()]);
-      io.adapter(createAdapter(pubClient, subClient));
-      console.log(`Socket.IO Redis adapter attached (${url})`);
-    } catch (err) {
-      console.warn('Redis adapter not attached, falling back to in-memory:', err.message);
-    }
-  })();
+  // instances. Skipped entirely when REDIS_URL is unset so single-instance
+  // deploys (Render free tier) don't spam the log with reconnect errors.
+  // The `redis` client retries forever once it starts trying to connect, so
+  // the previous try/catch wasn't enough — we must avoid `.connect()`.
+  if (process.env.REDIS_URL) {
+    (async function attachRedisAdapter() {
+      const url = process.env.REDIS_URL;
+      try {
+        const pubClient = createClient({ url });
+        const subClient = pubClient.duplicate();
+        pubClient.on('error', (err) => console.error('[redis pub] error:', err.message));
+        subClient.on('error', (err) => console.error('[redis sub] error:', err.message));
+        await Promise.all([pubClient.connect(), subClient.connect()]);
+        io.adapter(createAdapter(pubClient, subClient));
+        console.log(`Socket.IO Redis adapter attached (${url})`);
+      } catch (err) {
+        console.warn('Redis adapter not attached, falling back to in-memory:', err.message);
+      }
+    })();
+  } else {
+    console.log('Socket.IO using in-memory adapter (REDIS_URL not set)');
+  }
 
   // Make io accessible in route handlers via req.app.get('io')
   app.set('io', io);

@@ -25,8 +25,8 @@ class AppConfig {
   static const String _envBaseUrl = String.fromEnvironment(
     'BASE_URL',
     defaultValue:
-        // 'https://bayaaz-r9oe.onrender.com',
-        'https://having-telephone-zoning-parental.trycloudflare.com'
+        'https://bayaaz-r9oe.onrender.com',
+        
   );
 
   static String? _override;
