@@ -1,22 +1,23 @@
-"""STT service: Vosk WebSocket (group sessions) + Whisper HTTP (listen mode).
+"""Unified STT service — Vosk WebSocket + Whisper HTTP on a single port.
 
-Vosk WebSocket (port 5001)
-  Protocol unchanged — group session teleprompter streams raw PCM and gets
-  partial/final transcripts back.  The Hindi model is kept for that flow.
+Routes (one process, one bind port, one public URL):
+    WS  /ws            streaming Vosk recognizer for majlis voice-follow
+    POST /transcribe   Whisper batch transcription for listen mode
+    GET /health        liveness probe
 
-Whisper HTTP (port 5002)
-  POST /transcribe   multipart/form-data  field: audio (WAV file)
-  Response: {"transcript": "..."}
-  Uses faster-whisper with language="en" so Urdu speech comes back as Roman
-  transliteration that can be compared directly against the kalaam reference text.
+The protocols are unchanged from the previous split-port build — only the
+network layer was swapped from `websockets.serve` + Flask to FastAPI +
+uvicorn so a single hosting platform port covers both flows.
+
+Run:
+    uvicorn vosk_service:app --host 0.0.0.0 --port ${PORT:-5001}
 
 Env:
-  VOSK_MODEL_PATH     path to unzipped Vosk model (default ./model)
-  VOSK_HOST           WebSocket bind host (default 127.0.0.1)
-  VOSK_PORT           WebSocket bind port (default 5001)
-  VOSK_SAMPLE_RATE    default PCM rate (default 16000)
-  WHISPER_MODEL_SIZE  faster-whisper model name (default "base")
-  WHISPER_HTTP_PORT   HTTP bind port for Whisper endpoint (default 5002)
+    VOSK_MODEL_PATH     path to unzipped Vosk model (default ./model)
+    VOSK_SAMPLE_RATE    default PCM rate (default 16000)
+    WHISPER_MODEL_SIZE  faster-whisper model name (default "base")
+    PORT                bind port — informational only; the actual port
+                        is set on the uvicorn command line (default 5001)
 """
 
 import asyncio
@@ -24,23 +25,20 @@ import json
 import logging
 import os
 import tempfile
-import threading
+import urllib.request
+from contextlib import asynccontextmanager
 from typing import List, Optional
 
-import websockets
-from flask import Flask, jsonify, request
+from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from faster_whisper import WhisperModel
 from vosk import KaldiRecognizer, Model, SetLogLevel
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
 MODEL_PATH = os.getenv("VOSK_MODEL_PATH", "model")
-HOST = os.getenv("VOSK_HOST", "127.0.0.1")
-PORT = int(os.getenv("VOSK_PORT", "5001"))
 DEFAULT_SAMPLE_RATE = int(os.getenv("VOSK_SAMPLE_RATE", "16000"))
-
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")
-WHISPER_HTTP_PORT = int(os.getenv("WHISPER_HTTP_PORT", "5002"))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,7 +47,7 @@ logging.basicConfig(
 log = logging.getLogger("stt")
 SetLogLevel(-1)  # silence Kaldi/Vosk internal logs
 
-# ── Vosk model (group sessions) ───────────────────────────────────────────────
+# ── Models (loaded once, shared across requests) ──────────────────────────────
 
 log.info("loading vosk model from %s", MODEL_PATH)
 if not os.path.isdir(MODEL_PATH):
@@ -61,13 +59,81 @@ if not os.path.isdir(MODEL_PATH):
 vosk_model = Model(MODEL_PATH)
 log.info("vosk model loaded")
 
-# ── Whisper model (listen mode) ───────────────────────────────────────────────
-
 log.info("loading whisper model: %s", WHISPER_MODEL_SIZE)
 whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
 log.info("whisper model loaded")
 
-# ── Vosk WebSocket server ─────────────────────────────────────────────────────
+# ── Keep-alive (Render free tier sleeps after 15min idle) ─────────────────────
+#
+# Render's load balancer counts only requests that arrive through their
+# public proxy as "activity", so the ping has to go to RENDER_EXTERNAL_URL,
+# not to loopback. RENDER_EXTERNAL_URL is auto-injected by Render.
+#
+# Tweak the interval via KEEP_ALIVE_INTERVAL_SECONDS (default 600 = 10 min).
+# Set DISABLE_KEEP_ALIVE=1 to turn it off (useful for paid plans that don't
+# sleep, or when an external uptime monitor is doing the pinging).
+
+KEEP_ALIVE_URL = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("KEEP_ALIVE_URL")
+KEEP_ALIVE_INTERVAL = int(os.getenv("KEEP_ALIVE_INTERVAL_SECONDS", "600"))
+KEEP_ALIVE_DISABLED = os.getenv("DISABLE_KEEP_ALIVE") == "1"
+
+
+async def _keep_alive_loop():
+    target = f"{KEEP_ALIVE_URL.rstrip('/')}/health"
+    log.info("keep-alive: pinging %s every %ds", target, KEEP_ALIVE_INTERVAL)
+    while True:
+        try:
+            await asyncio.sleep(KEEP_ALIVE_INTERVAL)
+            # Run the blocking urllib call in a thread so we don't park
+            # the event loop on slow networks.
+            await asyncio.to_thread(
+                lambda: urllib.request.urlopen(target, timeout=10).read()
+            )
+        except asyncio.CancelledError:
+            log.info("keep-alive: stopping")
+            return
+        except Exception as e:
+            log.warning("keep-alive: ping failed: %s", e)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = None
+    if KEEP_ALIVE_URL and not KEEP_ALIVE_DISABLED:
+        task = asyncio.create_task(_keep_alive_loop())
+    else:
+        log.info(
+            "keep-alive: disabled (RENDER_EXTERNAL_URL=%s disabled=%s)",
+            bool(KEEP_ALIVE_URL),
+            KEEP_ALIVE_DISABLED,
+        )
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
+# ── FastAPI app ───────────────────────────────────────────────────────────────
+
+app = FastAPI(
+    title="Bayaaz STT",
+    docs_url=None,
+    redoc_url=None,
+    lifespan=lifespan,
+)
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+# ── Vosk WebSocket — majlis voice-follow ──────────────────────────────────────
 
 def make_recognizer(sample_rate: int, grammar: Optional[List[str]]) -> KaldiRecognizer:
     if grammar:
@@ -80,8 +146,10 @@ def make_recognizer(sample_rate: int, grammar: Optional[List[str]]) -> KaldiReco
     return rec
 
 
-async def recognize(ws):
-    client = f"{ws.remote_address[0]}:{ws.remote_address[1]}"
+@app.websocket("/ws")
+async def ws_recognize(ws: WebSocket):
+    await ws.accept()
+    client = f"{ws.client.host}:{ws.client.port}" if ws.client else "?"
     log.info("[%s] connected", client)
 
     sample_rate = DEFAULT_SAMPLE_RATE
@@ -90,10 +158,15 @@ async def recognize(ws):
     last_partial = ""
 
     try:
-        async for message in ws:
-            if isinstance(message, bytes):
-                bytes_received += len(message)
-                if rec.AcceptWaveform(message):
+        while True:
+            message = await ws.receive()
+            # FastAPI / Starlette delivers a dict — pick bytes or text manually.
+            if message["type"] == "websocket.disconnect":
+                break
+
+            if (data_bytes := message.get("bytes")) is not None:
+                bytes_received += len(data_bytes)
+                if rec.AcceptWaveform(data_bytes):
                     result = rec.Result()
                     try:
                         text = json.loads(result).get("text", "")
@@ -101,7 +174,7 @@ async def recognize(ws):
                         text = ""
                     if text:
                         log.info("[%s] final: %r", client, text)
-                    await ws.send(result)
+                    await ws.send_text(result)
                     last_partial = ""
                 else:
                     partial_raw = rec.PartialResult()
@@ -112,13 +185,17 @@ async def recognize(ws):
                     if partial and partial != last_partial:
                         log.info("[%s] partial: %r", client, partial)
                         last_partial = partial
-                        await ws.send(partial_raw)
+                        await ws.send_text(partial_raw)
+                continue
+
+            text_frame = message.get("text")
+            if not text_frame:
                 continue
 
             try:
-                data = json.loads(message)
+                data = json.loads(text_frame)
             except Exception:
-                log.warning("[%s] non-JSON text frame: %r", client, message[:80])
+                log.warning("[%s] non-JSON text frame: %r", client, text_frame[:80])
                 continue
 
             if data.get("eof") == 1:
@@ -128,7 +205,7 @@ async def recognize(ws):
                 except Exception:
                     text = ""
                 log.info("[%s] eof — final: %r (bytes=%d)", client, text, bytes_received)
-                await ws.send(final)
+                await ws.send_text(final)
                 break
 
             cfg = data.get("config")
@@ -143,70 +220,56 @@ async def recognize(ws):
                     sample_rate,
                     f"{len(grammar)} phrases" if grammar else "none",
                 )
-
-    except websockets.ConnectionClosed as e:
+    except WebSocketDisconnect as e:
         log.info("[%s] disconnected (%s)", client, e.code)
     except Exception:
         log.exception("[%s] handler crashed", client)
 
 
-async def run_vosk():
-    log.info("vosk ws listening on ws://%s:%d", HOST, PORT)
-    async with websockets.serve(
-        recognize,
-        HOST,
-        PORT,
-        max_size=8 * 1024 * 1024,
-        ping_interval=20,
-        ping_timeout=20,
-    ):
-        await asyncio.Future()
+# ── Whisper HTTP — listen mode ────────────────────────────────────────────────
 
-# ── Whisper Flask HTTP server ─────────────────────────────────────────────────
-
-flask_app = Flask(__name__)
-
-
-@flask_app.post("/transcribe")
-def transcribe():
-    if "audio" not in request.files:
-        return jsonify({"error": "No audio file provided"}), 400
-
-    audio_bytes = request.files["audio"].read()
+@app.post("/transcribe")
+async def transcribe(
+    audio: UploadFile = File(...),
+    hint: Optional[str] = Form(default=None),
+):
+    audio_bytes = await audio.read()
     if not audio_bytes:
-        return jsonify({"transcript": ""}), 200
+        return {"transcript": ""}
 
-    # Optional: first 1-2 lines of the kalaam in Roman script.
-    # Feeding these as initial_prompt biases Whisper to produce Roman Urdu
-    # output instead of translating to English or outputting Arabic script.
-    hint = request.form.get("hint", "").strip()
+    hint_text = (hint or "").strip()
 
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp.write(audio_bytes)
         tmp_path = tmp.name
 
-    try:
-        segments, info = whisper_model.transcribe(
+    def _transcribe_blocking():
+        return whisper_model.transcribe(
             tmp_path,
             # No explicit language — let Whisper detect naturally (Urdu audio
             # detected as "ur" keeps Arabic-script output, but initial_prompt
             # in Roman script overrides the output style to match the prompt).
             language=None,
             task="transcribe",
-            initial_prompt=hint or None,
+            initial_prompt=hint_text or None,
             beam_size=5,
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 500},
         )
+
+    try:
+        # faster-whisper is CPU-bound; offload to a thread so the event loop
+        # stays free for concurrent /ws sessions.
+        segments, info = await asyncio.to_thread(_transcribe_blocking)
         transcript = " ".join(s.text.strip() for s in segments).strip()
         log.info(
             "whisper transcript: %r (lang=%s hint=%r)",
-            transcript, info.language, hint[:40] if hint else None,
+            transcript, info.language, hint_text[:40] if hint_text else None,
         )
-        return jsonify({"transcript": transcript})
+        return {"transcript": transcript}
     except Exception as e:
         log.exception("whisper transcription failed")
-        return jsonify({"error": str(e)}), 500
+        return JSONResponse({"error": str(e)}, status_code=500)
     finally:
         try:
             os.unlink(tmp_path)
@@ -214,19 +277,13 @@ def transcribe():
             pass
 
 
-def run_flask():
-    log.info("whisper http listening on http://%s:%d", HOST, WHISPER_HTTP_PORT)
-    flask_app.run(
-        host=HOST,
-        port=WHISPER_HTTP_PORT,
-        debug=False,
-        use_reloader=False,
-    )
-
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Flask runs in a daemon thread; Vosk WebSocket runs in the main asyncio loop.
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    asyncio.run(run_vosk())
+    # Local convenience runner. In production use:
+    #   uvicorn vosk_service:app --host 0.0.0.0 --port $PORT
+    import uvicorn
+    port = int(os.getenv("PORT", "5001"))
+    host = os.getenv("HOST", "0.0.0.0")
+    log.info("starting unified stt service on %s:%d", host, port)
+    uvicorn.run(app, host=host, port=port, log_level="info", ws_max_size=8 * 1024 * 1024)
