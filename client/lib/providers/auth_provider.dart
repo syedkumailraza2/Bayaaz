@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/user_model.dart';
 import '../services/api_service.dart';
@@ -8,6 +9,14 @@ class AuthProvider extends ChangeNotifier {
   UserModel? _user;
   bool _loading = false;
   String? _error;
+
+  // `serverClientId` MUST be the Google OAuth **Web** client ID (same value as
+  // GOOGLE_WEB_CLIENT_ID on the server). Without it, idToken comes back null.
+  final GoogleSignIn _googleSignIn = GoogleSignIn(
+    serverClientId:
+        '484047874388-53lrv3vjscls2nfooiq1nb6a6l1a4b6v.apps.googleusercontent.com',
+    scopes: ['email', 'profile'],
+  );
 
   UserModel? get user => _user;
   bool get loading => _loading;
@@ -65,6 +74,37 @@ class AuthProvider extends ChangeNotifier {
     }
   }
 
+  /// Native Google Sign-In → verified server JWT. Returns false if the user
+  /// cancels the Google sheet (not an error).
+  Future<bool> googleSignIn() async {
+    _loading = true;
+    _error = null;
+    notifyListeners();
+    try {
+      final account = await _googleSignIn.signIn();
+      if (account == null) {
+        _loading = false;
+        notifyListeners();
+        return false; // user dismissed the picker
+      }
+      final gAuth = await account.authentication;
+      final idToken = gAuth.idToken;
+      if (idToken == null) {
+        throw Exception('No ID token from Google (check serverClientId / SHA-1)');
+      }
+      final data = await ApiService.googleLogin(idToken);
+      await _saveSession(data);
+      _loading = false;
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString().replaceAll('Exception: ', '');
+      _loading = false;
+      notifyListeners();
+      return false;
+    }
+  }
+
   Future<void> _saveSession(Map<String, dynamic> data) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('token', data['token']);
@@ -104,6 +144,10 @@ class AuthProvider extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('token');
     await prefs.remove('user');
+    // Clear the cached Google session too, so re-login shows the picker.
+    try {
+      await _googleSignIn.signOut();
+    } catch (_) {}
     _user = null;
     notifyListeners();
   }

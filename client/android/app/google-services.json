@@ -12,7 +12,12 @@
           "package_name": "com.bayaaz.bayaaz"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "484047874388-53lrv3vjscls2nfooiq1nb6a6l1a4b6v.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyDCAt6yYiWmLpdgieOq1Fx4Zu9mEFqqVoQ"
@@ -20,7 +25,19 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "484047874388-53lrv3vjscls2nfooiq1nb6a6l1a4b6v.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "484047874388-c7fdlse001e902n390tfufcv42gv16d2.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.kumailrazas.bayaaz"
+              }
+            }
+          ]
         }
       }
     },
@@ -31,7 +48,20 @@
           "package_name": "com.kumailrazas.bayaaz"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "484047874388-8o1unin9ghjo54h30mfho5cr5tpti81s.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.kumailrazas.bayaaz",
+            "certificate_hash": "9b2a22d482c6da0d195d7e04b5c6713d1140ed11"
+          }
+        },
+        {
+          "client_id": "484047874388-53lrv3vjscls2nfooiq1nb6a6l1a4b6v.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyDCAt6yYiWmLpdgieOq1Fx4Zu9mEFqqVoQ"
@@ -39,7 +69,19 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "484047874388-53lrv3vjscls2nfooiq1nb6a6l1a4b6v.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "484047874388-c7fdlse001e902n390tfufcv42gv16d2.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.kumailrazas.bayaaz"
+              }
+            }
+          ]
         }
       }
     }

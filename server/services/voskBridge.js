@@ -13,7 +13,9 @@ const Kalaam = require('../model/Kalaam');
 const { splitKalaamHemistichs } = require('./hemistichSplit');
 const { matchTranscriptToKalaam, _tokens } = require('./kalaamMatcher');
 
-const VOSK_URL = process.env.VOSK_URL || 'ws://127.0.0.1:5001';
+// The unified STT service serves the Vosk recognizer at /ws (FastAPI).
+// The path matters — connecting to the bare origin gets rejected.
+const VOSK_URL = process.env.VOSK_URL || 'ws://127.0.0.1:5001/ws';
 const SAMPLE_RATE = parseInt(process.env.VOSK_SAMPLE_RATE || '16000', 10);
 
 // Persist cursor at most this often per session — every frame would hammer Mongo.

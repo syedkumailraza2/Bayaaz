@@ -25,6 +25,9 @@ class AppConfig {
   static const String _envBaseUrl = String.fromEnvironment(
     'BASE_URL',
     defaultValue:
+        // Production default for pushed builds → Render.
+        // For local dev, use the in-app Server-URL dialog to override with a
+        // tunnel/LAN URL (e.g. the current cloudflared https://...trycloudflare.com).
         'https://bayaaz-r9oe.onrender.com',
         
   );

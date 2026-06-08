@@ -15,6 +15,17 @@ class SocketService {
 
   bool get isConnected => _socket?.connected ?? false;
 
+  /// socket_io_client (dart) does NOT default the port for a portless
+  /// `https://`/`http://` URL — it dials port 0, which never connects (the
+  /// `:0` we saw in connect_error). Force the scheme's default port so the
+  /// WebSocket/polling transport targets 443 (or 80) explicitly.
+  static String _withExplicitPort(String url) {
+    final uri = Uri.parse(url);
+    if (uri.hasPort) return url;
+    final port = uri.scheme == 'https' ? 443 : 80;
+    return uri.replace(port: port).toString();
+  }
+
   /// Idempotent and actually waits for the handshake to complete.
   ///
   /// The previous implementation returned the moment `_socket!.connect()`
@@ -38,11 +49,15 @@ class SocketService {
         if ((token ?? '').isEmpty) {
           debugPrint('[socket] WARNING: connecting without a token');
         }
-        debugPrint('[socket] dialing ${AppConfig.socketUrl}');
+        final dialUrl = _withExplicitPort(AppConfig.socketUrl);
+        debugPrint('[socket] dialing $dialUrl');
         _socket = IO.io(
-          AppConfig.socketUrl,
+          dialUrl,
           IO.OptionBuilder()
-              .setTransports(['websocket', 'polling'])
+              // WebSocket-only: through a Cloudflare tunnel the polling→ws
+              // upgrade dance stalls (handshake arrives but the follow-up
+              // polling POST never completes). Raw WS works, so skip polling.
+              .setTransports(['websocket'])
               .setAuth({'token': token ?? ''})
               .enableReconnection()
               .setReconnectionDelay(1000)
