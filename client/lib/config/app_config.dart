@@ -8,7 +8,7 @@ const bool kIsBeta = true;
 /// Human-readable version shown alongside the BETA pill. Keep in sync
 /// with `version:` in pubspec.yaml — that's the source of truth at
 /// build time; this constant is only for display.
-const String kAppVersionLabel = '1.0.0-beta.1';
+const String kAppVersionLabel = '1.0.0-beta.2';
 
 /// Holds the server base URL.
 ///

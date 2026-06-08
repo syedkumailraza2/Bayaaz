@@ -5,7 +5,7 @@ publish_to: 'none'
 # Bump the build number (after `+`) for every store upload, and bump
 # the beta number (`beta.N`) at each invite wave. Flip to plain
 # `1.0.0+N` once we cut the stable launch.
-version: 1.0.0-beta.1+1
+version: 1.0.0-beta.2+2
 
 environment:
   sdk: ^3.11.5
