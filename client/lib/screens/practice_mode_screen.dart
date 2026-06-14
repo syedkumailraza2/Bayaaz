@@ -454,44 +454,6 @@ class _PracticeModeScreenState extends State<PracticeModeScreen>
 
   // ── Navigation (preserved) ──────────────────────────────────────────────
 
-  void _nextLine() {
-    if (_lines.isEmpty) return;
-
-    if (_loopStanzaIndex >= 0) {
-      final currentStanza = _lines[_currentLineIndex].stanzaIndex;
-      if (currentStanza == _loopStanzaIndex) {
-        final isLastInStanza = _currentLineIndex == _lines.length - 1 ||
-            _lines[_currentLineIndex + 1].stanzaIndex != _loopStanzaIndex;
-        if (isLastInStanza) {
-          final firstLineOfStanza =
-              _lines.indexWhere((l) => l.stanzaIndex == _loopStanzaIndex);
-          if (firstLineOfStanza >= 0) {
-            setState(() => _currentLineIndex = firstLineOfStanza);
-            _persistProgress(completed: false);
-            _scrollToCurrentLine();
-            return;
-          }
-        }
-      }
-    }
-
-    if (_currentLineIndex < _lines.length - 1) {
-      setState(() => _currentLineIndex++);
-      _persistProgress(completed: false);
-      _scrollToCurrentLine();
-    } else {
-      _persistProgress(completed: true);
-    }
-  }
-
-  void _prevLine() {
-    if (_currentLineIndex > 0) {
-      setState(() => _currentLineIndex--);
-      _persistProgress(completed: false);
-      _scrollToCurrentLine();
-    }
-  }
-
   void _togglePlayPause() {
     if (_audioPlayer == null) return;
     if (_isPlaying) {
@@ -628,6 +590,10 @@ class _PracticeModeScreenState extends State<PracticeModeScreen>
                                   lines: _lines,
                                   lineKeys: _lineKeys,
                                   isLooping: _loopStanzaIndex == si,
+                                  // Only light up the current line once the
+                                  // teleprompter (voice follow) is on. Until
+                                  // then the kalaam reads as plain text.
+                                  highlightEnabled: _voiceMode,
                                 ),
                                 if (showDivider)
                                   _StanzaDivider(
@@ -672,8 +638,6 @@ class _PracticeModeScreenState extends State<PracticeModeScreen>
                           isPlaying: _isPlaying,
                           hasAudio: _hasAudio,
                           onBack: () => Navigator.of(context).maybePop(),
-                          onPrev: _prevLine,
-                          onNext: _nextLine,
                           onPlayPause: _togglePlayPause,
                         ),
                       ],
@@ -914,6 +878,7 @@ class _StanzaBlock extends StatelessWidget {
   final List<_LineItem> lines;
   final List<GlobalKey> lineKeys;
   final bool isLooping;
+  final bool highlightEnabled;
 
   const _StanzaBlock({
     required this.stanza,
@@ -922,6 +887,7 @@ class _StanzaBlock extends StatelessWidget {
     required this.lines,
     required this.lineKeys,
     required this.isLooping,
+    required this.highlightEnabled,
   });
 
   @override
@@ -937,8 +903,11 @@ class _StanzaBlock extends StatelessWidget {
           _LineRow(
             text: stanza.lines[li],
             lineKey: _lineKeyFor(stanzaIndex, li),
-            isActive: _isActive(stanzaIndex, li),
-            isInActiveStanza: activeStanzaIndex == stanzaIndex,
+            isActive: highlightEnabled && _isActive(stanzaIndex, li),
+            // With the teleprompter off every line reads at full strength;
+            // the active-stanza dimming only kicks in while following.
+            isInActiveStanza:
+                !highlightEnabled || activeStanzaIndex == stanzaIndex,
             isLooping: isLooping,
           ),
       ],
@@ -1186,16 +1155,12 @@ class _BottomActionBar extends StatelessWidget {
   final bool isPlaying;
   final bool hasAudio;
   final VoidCallback onBack;
-  final VoidCallback onPrev;
-  final VoidCallback onNext;
   final VoidCallback onPlayPause;
 
   const _BottomActionBar({
     required this.isPlaying,
     required this.hasAudio,
     required this.onBack,
-    required this.onPrev,
-    required this.onNext,
     required this.onPlayPause,
   });
 
@@ -1246,74 +1211,44 @@ class _BottomActionBar extends StatelessWidget {
                 ),
               ],
             ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                _CapsuleIconButton(
-                  icon: Icons.skip_previous_rounded,
-                  onTap: onPrev,
-                ),
-                GestureDetector(
-                  onTap: hasAudio ? onPlayPause : null,
-                  behavior: HitTestBehavior.opaque,
-                  child: SizedBox(
-                    width: 56,
-                    height: 56,
-                    child: Center(
-                      child: AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 200),
-                        transitionBuilder: (child, anim) => ScaleTransition(
-                          scale: anim,
-                          child: child,
-                        ),
-                        child: Icon(
-                          !hasAudio
-                              ? Icons.music_note_rounded
-                              : isPlaying
-                                  ? Icons.pause_rounded
-                                  : Icons.play_arrow_rounded,
-                          key: ValueKey(!hasAudio
-                              ? 'no_audio'
-                              : isPlaying
-                                  ? 'pause'
-                                  : 'play'),
-                          color: hasAudio
-                              ? Colors.white
-                              : Colors.white.withValues(alpha: 0.35),
-                          size: 32,
-                        ),
+            child: Center(
+              child: GestureDetector(
+                onTap: hasAudio ? onPlayPause : null,
+                behavior: HitTestBehavior.opaque,
+                child: SizedBox(
+                  width: 56,
+                  height: 56,
+                  child: Center(
+                    child: AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 200),
+                      transitionBuilder: (child, anim) => ScaleTransition(
+                        scale: anim,
+                        child: child,
+                      ),
+                      child: Icon(
+                        !hasAudio
+                            ? Icons.music_note_rounded
+                            : isPlaying
+                                ? Icons.pause_rounded
+                                : Icons.play_arrow_rounded,
+                        key: ValueKey(!hasAudio
+                            ? 'no_audio'
+                            : isPlaying
+                                ? 'pause'
+                                : 'play'),
+                        color: hasAudio
+                            ? Colors.white
+                            : Colors.white.withValues(alpha: 0.35),
+                        size: 32,
                       ),
                     ),
                   ),
                 ),
-                _CapsuleIconButton(
-                  icon: Icons.skip_next_rounded,
-                  onTap: onNext,
-                ),
-              ],
+              ),
             ),
           ),
         ),
       ],
-    );
-  }
-}
-
-class _CapsuleIconButton extends StatelessWidget {
-  final IconData icon;
-  final VoidCallback onTap;
-  const _CapsuleIconButton({required this.icon, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: SizedBox(
-        width: 56,
-        height: 56,
-        child: Icon(icon, color: Colors.white, size: 28),
-      ),
     );
   }
 }

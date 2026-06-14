@@ -8,7 +8,7 @@ const bool kIsBeta = true;
 /// Human-readable version shown alongside the BETA pill. Keep in sync
 /// with `version:` in pubspec.yaml — that's the source of truth at
 /// build time; this constant is only for display.
-const String kAppVersionLabel = '1.0.0-beta.1';
+const String kAppVersionLabel = '1.0.0-beta.2';
 
 /// Holds the server base URL.
 ///
@@ -25,6 +25,9 @@ class AppConfig {
   static const String _envBaseUrl = String.fromEnvironment(
     'BASE_URL',
     defaultValue:
+        // Production default for pushed builds → Render.
+        // For local dev, use the in-app Server-URL dialog to override with a
+        // tunnel/LAN URL (e.g. the current cloudflared https://...trycloudflare.com).
         'https://bayaaz-r9oe.onrender.com',
         
   );

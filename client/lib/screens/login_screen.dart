@@ -118,6 +118,16 @@ class _LoginScreenState extends State<LoginScreen>
     }
   }
 
+  Future<void> _googleSignIn() async {
+    final auth = context.read<AuthProvider>();
+    auth.clearError();
+    final success = await auth.googleSignIn();
+    if (success && mounted) {
+      Navigator.pushReplacementNamed(context, '/home');
+      unawaited(DeepLinkService.instance.consumePendingToken());
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final auth = context.watch<AuthProvider>();
@@ -281,6 +291,11 @@ class _LoginScreenState extends State<LoginScreen>
                             label: _isRegister ? 'Create Account' : 'Sign In',
                             loading: auth.loading,
                             onPressed: _submit,
+                          ),
+                          const SizedBox(height: 16),
+                          _GoogleSignInButton(
+                            loading: auth.loading,
+                            onPressed: _googleSignIn,
                           ),
                         ],
                       ),
@@ -541,6 +556,56 @@ class _SubmitButtonState extends State<_SubmitButton> {
                     ),
                   ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Google sign-in button ──────────────────────────────────────────────────
+
+class _GoogleSignInButton extends StatelessWidget {
+  final bool loading;
+  final VoidCallback onPressed;
+
+  const _GoogleSignInButton({required this.loading, required this.onPressed});
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = _Palette.of(context);
+    return GestureDetector(
+      onTap: loading ? null : onPressed,
+      child: Container(
+        width: double.infinity,
+        height: 52,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: palette.isDark ? const Color(0xFF2A2A2A) : Colors.white,
+          borderRadius: BorderRadius.circular(40),
+          border: Border.all(color: _kInkMutedNeutral.withValues(alpha: 0.4)),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              'G',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w800,
+                color: palette.isDark ? Colors.white : _kTeal,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Text(
+              'Continue with Google',
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                letterSpacing: -0.2,
+                color: palette.isDark ? Colors.white : _kTeal,
+              ),
+            ),
+          ],
         ),
       ),
     );

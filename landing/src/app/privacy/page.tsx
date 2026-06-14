@@ -129,7 +129,7 @@ export default function PrivacyPage() {
       <h2>9. Contact</h2>
       <p>
         Questions, requests, or concerns? Reach us at{" "}
-        <strong>privacy@bayaaz.app</strong>. We aim to respond within five
+        <strong>kumailappdev@gmail.com</strong>. We aim to respond within five
         business days.
       </p>
     </LegalShell>

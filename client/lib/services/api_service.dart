@@ -70,6 +70,22 @@ class ApiService {
     }
   }
 
+  static Future<Map<String, dynamic>> googleLogin(String idToken) async {
+    try {
+      final res = await http.post(
+        Uri.parse('$kBaseUrl/auth/google'),
+        headers: {'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true'},
+        body: jsonEncode({'idToken': idToken}),
+      );
+      if (res.statusCode == 200) return jsonDecode(res.body);
+      throw Exception(_parseBody(res)['message'] ?? 'Google sign-in failed (${res.statusCode})');
+    } on Exception {
+      rethrow;
+    } catch (e) {
+      throw Exception('Cannot reach server. Is it running?');
+    }
+  }
+
   // Kalaams — paginated search/filter feed
   static Future<KalaamPage> getPublicKalaams({
     String? category,

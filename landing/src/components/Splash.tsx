@@ -62,7 +62,7 @@ export default function Splash() {
             letterSpacing: "-0.56px",
           }}
         >
-          اسلام علیکم بیاز میں خوش آمدید
+          اسلام علیکم بیاض میں خوش آمدید
         </p>
       </div>
       <div className="flex-1 flex items-end w-full px-6">

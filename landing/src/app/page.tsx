@@ -104,7 +104,7 @@ export default function Home() {
               </span>
               <span className="w-2 h-2 rounded-full bg-secondary-fixed-dim" />
               <span className="font-[family-name:var(--font-naskh)] text-xl text-primary font-bold">
-                ضایب
+                بیاض
               </span>
               <span className="w-2 h-2 rounded-full bg-secondary-fixed-dim" />
               <span className="font-mono text-xs tracking-widest text-on-surface-variant">
@@ -126,7 +126,7 @@ export default function Home() {
               </span>
               <span className="w-2 h-2 rounded-full bg-secondary-fixed-dim" />
               <span className="font-[family-name:var(--font-naskh)] text-xl text-primary font-bold">
-                ضایب
+                بیاض
               </span>
               <span className="w-2 h-2 rounded-full bg-secondary-fixed-dim" />
               <span className="font-mono text-xs tracking-widest text-on-surface-variant">
@@ -470,7 +470,7 @@ export default function Home() {
         </div>
         <div className="container mx-auto max-w-[1080px] px-6 md:px-0 flex flex-col items-center text-center relative z-10">
           <span className="font-[family-name:var(--font-naskh)] text-[80px] md:text-[120px] leading-none mb-6 md:mb-8 font-bold">
-            ضایب
+            بیاض
           </span>
           <h2 className="text-[44px] md:text-[64px] lg:text-[96px] leading-[0.95] tracking-tight mb-10 md:mb-12 font-extrabold">
             Make your bayaaz.
