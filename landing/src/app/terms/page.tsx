@@ -119,7 +119,7 @@ export default function TermsPage() {
       <h2>11. Contact</h2>
       <p>
         Questions about these Terms? Email us at{" "}
-        <strong>legal@bayaaz.app</strong>.
+        <strong>kumailappdev@gmail.com</strong>.
       </p>
     </LegalShell>
   );
