@@ -21,8 +21,6 @@ services:
     envVars:
       - key: VOSK_MODEL_PATH
         value: ./model
-      - key: WHISPER_MODEL_SIZE
-        value: base
       - key: VOSK_SAMPLE_RATE
         value: "16000"
       - key: KEEP_ALIVE_INTERVAL_SECONDS

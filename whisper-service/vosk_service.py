@@ -1,13 +1,13 @@
-"""Unified STT service — Vosk WebSocket + Whisper HTTP on a single port.
+"""Unified STT service — Vosk for both streaming and batch, on a single port.
 
 Routes (one process, one bind port, one public URL):
     WS  /ws            streaming Vosk recognizer for majlis voice-follow
-    POST /transcribe   Whisper batch transcription for listen mode
+    POST /transcribe   Vosk batch transcription for listen mode
     GET /health        liveness probe
 
-The protocols are unchanged from the previous split-port build — only the
-network layer was swapped from `websockets.serve` + Flask to FastAPI +
-uvicorn so a single hosting platform port covers both flows.
+A single Vosk model serves both flows, so only one model is resident in RAM.
+(/transcribe previously used faster-whisper, but that doubled model memory and
+pushed small instances over their limit; Vosk handles batch WAVs fine.)
 
 Run:
     uvicorn vosk_service:app --host 0.0.0.0 --port ${PORT:-5001}
@@ -15,30 +15,28 @@ Run:
 Env:
     VOSK_MODEL_PATH     path to unzipped Vosk model (default ./model)
     VOSK_SAMPLE_RATE    default PCM rate (default 16000)
-    WHISPER_MODEL_SIZE  faster-whisper model name (default "base")
     PORT                bind port — informational only; the actual port
                         is set on the uvicorn command line (default 5001)
 """
 
 import asyncio
+import io
 import json
 import logging
 import os
-import tempfile
 import urllib.request
+import wave
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
 from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
-from faster_whisper import WhisperModel
 from vosk import KaldiRecognizer, Model, SetLogLevel
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
 MODEL_PATH = os.getenv("VOSK_MODEL_PATH", "model")
 DEFAULT_SAMPLE_RATE = int(os.getenv("VOSK_SAMPLE_RATE", "16000"))
-WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,9 +57,11 @@ if not os.path.isdir(MODEL_PATH):
 vosk_model = Model(MODEL_PATH)
 log.info("vosk model loaded")
 
-log.info("loading whisper model: %s", WHISPER_MODEL_SIZE)
-whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
-log.info("whisper model loaded")
+# Single-model service: Vosk serves BOTH the streaming /ws path (practice mode)
+# and the batch /transcribe path (listen mode). We used to load faster-whisper
+# for /transcribe, but that doubled the resident model memory (~200MB+) and
+# pushed small instances over their RAM limit. Vosk handles batch files fine —
+# the kalaam matcher already transliterates Vosk's Devanagari output for Urdu.
 
 # ── Keep-alive (Render free tier sleeps after 15min idle) ─────────────────────
 #
@@ -226,55 +226,64 @@ async def ws_recognize(ws: WebSocket):
         log.exception("[%s] handler crashed", client)
 
 
-# ── Whisper HTTP — listen mode ────────────────────────────────────────────────
+# ── Vosk HTTP batch — listen mode ─────────────────────────────────────────────
+
+def _vosk_transcribe_wav(audio_bytes: bytes) -> str:
+    """Run a full WAV through a fresh Vosk recognizer and return the text.
+
+    The client builds a 16kHz mono 16-bit PCM WAV before upload, which is
+    exactly Vosk's required input — no decode/resample needed. If the bytes
+    aren't a parseable WAV we fall back to treating them as raw PCM at the
+    default sample rate.
+    """
+    try:
+        wf = wave.open(io.BytesIO(audio_bytes), "rb")
+        sample_rate = wf.getframerate()
+        # Vosk needs mono 16-bit PCM. The client guarantees this; if a caller
+        # sends something else, log it — recognition quality will suffer.
+        if wf.getnchannels() != 1 or wf.getsampwidth() != 2:
+            log.warning(
+                "transcribe: expected mono/16-bit, got channels=%d width=%d",
+                wf.getnchannels(), wf.getsampwidth(),
+            )
+        rec = KaldiRecognizer(vosk_model, sample_rate)
+        rec.SetWords(True)
+        while True:
+            frames = wf.readframes(4000)
+            if not frames:
+                break
+            rec.AcceptWaveform(frames)
+    except wave.Error:
+        # Not a WAV container — feed the raw bytes as PCM at the default rate.
+        log.warning("transcribe: unparseable WAV, treating as raw PCM")
+        rec = KaldiRecognizer(vosk_model, DEFAULT_SAMPLE_RATE)
+        rec.SetWords(True)
+        rec.AcceptWaveform(audio_bytes)
+
+    return json.loads(rec.FinalResult()).get("text", "")
+
 
 @app.post("/transcribe")
 async def transcribe(
     audio: UploadFile = File(...),
+    # Accepted for backward-compat with the client's multipart form. Vosk has no
+    # initial-prompt equivalent, so it's currently unused; phrase biasing would
+    # need the full reference lines passed as a Vosk grammar instead.
     hint: Optional[str] = Form(default=None),
 ):
     audio_bytes = await audio.read()
     if not audio_bytes:
         return {"transcript": ""}
 
-    hint_text = (hint or "").strip()
-
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        tmp.write(audio_bytes)
-        tmp_path = tmp.name
-
-    def _transcribe_blocking():
-        return whisper_model.transcribe(
-            tmp_path,
-            # No explicit language — let Whisper detect naturally (Urdu audio
-            # detected as "ur" keeps Arabic-script output, but initial_prompt
-            # in Roman script overrides the output style to match the prompt).
-            language=None,
-            task="transcribe",
-            initial_prompt=hint_text or None,
-            beam_size=5,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 500},
-        )
-
     try:
-        # faster-whisper is CPU-bound; offload to a thread so the event loop
+        # Vosk decoding is CPU-bound; offload to a thread so the event loop
         # stays free for concurrent /ws sessions.
-        segments, info = await asyncio.to_thread(_transcribe_blocking)
-        transcript = " ".join(s.text.strip() for s in segments).strip()
-        log.info(
-            "whisper transcript: %r (lang=%s hint=%r)",
-            transcript, info.language, hint_text[:40] if hint_text else None,
-        )
+        transcript = await asyncio.to_thread(_vosk_transcribe_wav, audio_bytes)
+        log.info("vosk transcript: %r", transcript)
         return {"transcript": transcript}
     except Exception as e:
-        log.exception("whisper transcription failed")
+        log.exception("vosk transcription failed")
         return JSONResponse({"error": str(e)}, status_code=500)
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
