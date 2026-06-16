@@ -34,13 +34,70 @@ class SessionScore {
 typedef WordMatch = ({String word, bool matched});
 
 class ScoringService {
-  // Strip Arabic diacritics (harakat) and normalise whitespace.
+  // Urdu (Arabic-script) → rough Latin. Listen mode now transcribes with Vosk,
+  // whose Hindi model emits Devanagari, while the stored kalaam is Arabic script
+  // and/or Roman. Transliterating every script into one consonant-skeleton Latin
+  // space lets them compare. Mirrors the server matcher (kalaamMatcher.js) so the
+  // two scoring paths agree. Short vowels are unwritten in Urdu, so the result is
+  // consonant-heavy; the word edit distance absorbs the remaining vowel drift.
+  static const Map<String, String> _urduToLatin = {
+    'ا': 'a', 'ب': 'b', 'پ': 'p', 'ت': 't', 'ٹ': 't', 'ث': 's',
+    'ج': 'j', 'چ': 'ch', 'ح': 'h', 'خ': 'kh', 'د': 'd', 'ڈ': 'd',
+    'ذ': 'z', 'ر': 'r', 'ڑ': 'r', 'ز': 'z', 'ژ': 'zh', 'س': 's',
+    'ش': 'sh', 'ص': 's', 'ض': 'z', 'ط': 't', 'ظ': 'z', 'ع': 'a',
+    'غ': 'gh', 'ف': 'f', 'ق': 'q', 'ک': 'k', 'ك': 'k', 'گ': 'g',
+    'ل': 'l', 'م': 'm', 'ن': 'n', 'ں': 'n', 'و': 'o', 'ہ': 'h',
+    'ھ': 'h', 'ۂ': 'h', 'ۃ': 'h', 'ء': '', 'ئ': 'y', 'ؤ': 'o',
+    'ی': 'y', 'ے': 'e',
+  };
+
+  // Devanagari (Vosk Hindi output) → Latin. Long-vowel matra "ा" maps to a
+  // single 'a' (not 'aa') to better match romanizations like "raat" → "rat".
+  static const Map<String, String> _devanagariToLatin = {
+    'क': 'k', 'ख': 'kh', 'ग': 'g', 'घ': 'gh', 'ङ': 'n',
+    'च': 'ch', 'छ': 'chh', 'ज': 'j', 'झ': 'jh', 'ञ': 'n',
+    'ट': 't', 'ठ': 'th', 'ड': 'd', 'ढ': 'dh', 'ण': 'n',
+    'त': 't', 'थ': 'th', 'द': 'd', 'ध': 'dh', 'न': 'n',
+    'प': 'p', 'फ': 'ph', 'ब': 'b', 'भ': 'bh', 'म': 'm',
+    'य': 'y', 'र': 'r', 'ल': 'l', 'व': 'w',
+    'श': 'sh', 'ष': 'sh', 'स': 's', 'ह': 'h',
+    'क़': 'q', 'ख़': 'kh', 'ग़': 'gh', 'ज़': 'z', 'ड़': 'r', 'ढ़': 'r', 'फ़': 'f',
+    'अ': 'a', 'आ': 'a', 'इ': 'i', 'ई': 'i', 'उ': 'u', 'ऊ': 'u',
+    'ए': 'e', 'ऐ': 'ai', 'ओ': 'o', 'औ': 'au', 'ऋ': 'r',
+    'ा': 'a', 'ि': 'i', 'ी': 'i', 'ु': 'u', 'ू': 'u',
+    'े': 'e', 'ै': 'ai', 'ो': 'o', 'ौ': 'au', 'ृ': 'r',
+    'ं': 'n', 'ः': 'h', 'ँ': 'n',
+    '्': '', '़': '', 'ऽ': '',
+    '०': '0', '१': '1', '२': '2', '३': '3', '४': '4',
+    '५': '5', '६': '6', '७': '7', '८': '8', '९': '9',
+  };
+
+  static String _transliterate(String s) {
+    final buf = StringBuffer();
+    for (final rune in s.runes) {
+      final ch = String.fromCharCode(rune);
+      buf.write(_urduToLatin[ch] ?? _devanagariToLatin[ch] ?? ch);
+    }
+    return buf.toString();
+  }
+
+  // Strip diacritics, canonicalise letter variants, transliterate Urdu + Hindi
+  // to Latin, lowercase, drop punctuation, and collapse whitespace. Mirrors the
+  // server's kalaamMatcher.normalize() so both scoring paths see the same space.
   static String normaliseText(String text) {
-    return text
-        .toLowerCase()
-        .replaceAll(RegExp(r'[ً-ٰٟۖ-ۜ۟-۪ۤۧۨ-ۭ]'), '')
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
+    var s = text;
+    // Arabic diacritics (harakat) + tatweel — drop before transliteration.
+    s = s.replaceAll(RegExp(r'[ً-ْٰـ]'), '');
+    // Canonicalise alif / ya / teh-marbuta variants so the table sees them.
+    s = s.replaceAll(RegExp(r'[آإأٱ]'), 'ا');
+    s = s.replaceAll(RegExp(r'[يى]'), 'ی');
+    s = s.replaceAll('ة', 'ہ');
+    s = _transliterate(s);
+    s = s.toLowerCase();
+    // Punctuation + symbols (incl. Arabic full-stop/comma/question mark).
+    s = s.replaceAll(
+        RegExp(r'''[.,!?;:"'`~()\[\]{}<>\-—_/\\|@#$%^&*+=۔،؟]'''), ' ');
+    return s.replaceAll(RegExp(r'\s+'), ' ').trim();
   }
 
   // Word-level edit distance (WER numerator).
