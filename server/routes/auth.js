@@ -17,6 +17,7 @@ const userPayload = (user) => ({
   name: user.name,
   email: user.email,
   avatar: user.avatar || null,
+  role: user.role || 'user',
 });
 
 // Light-weight URL validation. We don't want to be strict (lots of valid

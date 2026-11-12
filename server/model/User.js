@@ -15,6 +15,9 @@ const userSchema = new mongoose.Schema({
   // Public-readable URL for the user's avatar image. Optional; the client
   // falls back to a coloured circle with the first letter of the name.
   avatar: { type: String, trim: true, default: null },
+  // 'admin' can create kalaams and manage everyone's content. Granted via
+  // scripts/make-admin.js — never settable through the public API.
+  role: { type: String, enum: ['user', 'admin'], default: 'user' },
   savedKalaams: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Kalaam' }],
 }, { timestamps: true });
 
