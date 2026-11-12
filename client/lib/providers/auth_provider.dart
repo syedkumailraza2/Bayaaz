@@ -22,6 +22,22 @@ class AuthProvider extends ChangeNotifier {
   bool get loading => _loading;
   String? get error => _error;
   bool get isLoggedIn => _user != null;
+  bool get isAdmin => _user?.isAdmin ?? false;
+
+  /// Re-reads the profile from the server so role changes (e.g. being made
+  /// an admin) reach users who logged in before the change. Silent on error:
+  /// the cached profile stays in place.
+  Future<void> refreshMe() async {
+    if (_user == null) return;
+    try {
+      final data = await ApiService.getMe();
+      final userJson = data['user'] as Map<String, dynamic>;
+      _user = UserModel.fromJson(userJson);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('user', jsonEncode(userJson));
+      notifyListeners();
+    } catch (_) {}
+  }
 
   void clearError() {
     _error = null;

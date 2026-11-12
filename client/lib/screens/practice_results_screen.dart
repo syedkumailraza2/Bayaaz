@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../config/app_config.dart';
 import '../models/kalaam_model.dart';
 import '../services/analytics_service.dart';
 import '../services/feedback_engine.dart';
@@ -584,13 +585,15 @@ class _ActionButtons extends StatelessWidget {
             ),
           ),
         ),
-        const SizedBox(height: 12),
-        TextButton.icon(
-          onPressed: onPacks,
-          icon: const Icon(Icons.download_outlined, size: 16),
-          label: const Text('Manage AI Packs'),
-          style: TextButton.styleFrom(foregroundColor: _kInkMuted),
-        ),
+        if (kAiPracticeEnabled) ...[
+          const SizedBox(height: 12),
+          TextButton.icon(
+            onPressed: onPacks,
+            icon: const Icon(Icons.download_outlined, size: 16),
+            label: const Text('Manage AI Packs'),
+            style: TextButton.styleFrom(foregroundColor: _kInkMuted),
+          ),
+        ],
       ],
     );
   }

@@ -81,8 +81,9 @@ class DeepLinkService {
   }
 
   String? _extractToken(Uri uri) {
-    // Accept bayaaz://i/<token> or https://bayaaz.app/i/<token>.
-    if (uri.scheme != 'bayaaz' && uri.host != 'bayaaz.app') return null;
+    // Accept bayaaz://i/<token> or https://<our host>/i/<token>.
+    const webHosts = {'api.mybayaaz.com', 'www.mybayaaz.com', 'mybayaaz.com'};
+    if (uri.scheme != 'bayaaz' && !webHosts.contains(uri.host)) return null;
     final segments = uri.pathSegments;
     if (uri.scheme == 'bayaaz' && uri.host == 'i' && segments.isNotEmpty) {
       return segments.first;

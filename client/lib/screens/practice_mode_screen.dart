@@ -4,6 +4,7 @@ import 'dart:math' as math;
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
+import '../config/app_config.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -179,6 +180,8 @@ class _PracticeModeScreenState extends State<PracticeModeScreen>
         ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>;
     _kalaam = args['kalaam'] as KalaamModel;
     _mode = (args['mode'] as String?) ?? 'solo';
+    // Listen (AI scoring) is paused; degrade any stale entry point to Follow.
+    if (_mode == 'listen' && !kAiPracticeEnabled) _mode = 'follow';
 
     _lines = _buildLines(_kalaam);
     _lineKeys = List.generate(_lines.length, (_) => GlobalKey());

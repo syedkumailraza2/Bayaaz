@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../config/app_config.dart';
 import '../models/kalaam_model.dart';
 import '../providers/auth_provider.dart';
 import '../providers/kalaam_provider.dart';
@@ -624,16 +625,19 @@ class _CtaRow extends StatelessWidget {
             onTap: onRead,
           ),
         ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: _PressablePill(
-            background: isDark ? const Color(0xFF1F1F1F) : Colors.black,
-            foreground: Colors.white,
-            icon: Icons.mic_rounded,
-            label: 'Practice Mode',
-            onTap: onPractice,
+        // Practice Mode opens Listen (AI scoring), which is paused.
+        if (kAiPracticeEnabled) ...[
+          const SizedBox(width: 10),
+          Expanded(
+            child: _PressablePill(
+              background: isDark ? const Color(0xFF1F1F1F) : Colors.black,
+              foreground: Colors.white,
+              icon: Icons.mic_rounded,
+              label: 'Practice Mode',
+              onTap: onPractice,
+            ),
           ),
-        ),
+        ],
       ],
     );
   }

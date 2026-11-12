@@ -325,6 +325,15 @@ class ApiService {
     throw Exception('Failed to record view');
   }
 
+  /// Fetches the signed-in user's profile (incl. role) from the server.
+  static Future<Map<String, dynamic>> getMe() async {
+    final res = await http
+        .get(Uri.parse('$kBaseUrl/auth/me'), headers: await _authHeaders())
+        .timeout(const Duration(seconds: 15));
+    if (res.statusCode == 200) return jsonDecode(res.body);
+    throw Exception(_parseBody(res)['message'] ?? 'Failed to load profile');
+  }
+
   /// Patches the signed-in user's profile. Pass `avatar: null` (with
   /// `clearAvatar: true`) to remove the avatar.
   static Future<Map<String, dynamic>> updateProfile({

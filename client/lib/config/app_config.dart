@@ -10,6 +10,11 @@ const bool kIsBeta = true;
 /// build time; this constant is only for display.
 const String kAppVersionLabel = '1.0.0-beta.2';
 
+/// AI practice features (Listen mode scoring + the on-device AI Coach model
+/// and its auto-download). Paused for now: the code stays in place and
+/// flipping this to `true` brings the whole feature back.
+const bool kAiPracticeEnabled = false;
+
 /// Holds the server base URL.
 ///
 /// Resolution order (first match wins):
@@ -25,11 +30,11 @@ class AppConfig {
   static const String _envBaseUrl = String.fromEnvironment(
     'BASE_URL',
     defaultValue:
-        // Production default for pushed builds → Render.
+        // Production default for pushed builds. Our own domain (a CNAME to
+        // the Render service) so the host can move without an app release.
         // For local dev, use the in-app Server-URL dialog to override with a
         // tunnel/LAN URL (e.g. the current cloudflared https://...trycloudflare.com).
-        'https://bayaaz-r9oe.onrender.com',
-        
+        'https://api.mybayaaz.com',
   );
 
   static String? _override;

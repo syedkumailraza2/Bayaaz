@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../config/app_config.dart';
 import '../models/kalaam_model.dart';
 import '../providers/practice_provider.dart';
 import '../services/device_capability_service.dart';
@@ -57,14 +58,15 @@ class _PracticeLauncherSheet extends StatelessWidget {
                   ),
                 ),
                 const Spacer(),
-                GestureDetector(
-                  onTap: () {
-                    Navigator.pop(context);
-                    Navigator.pushNamed(context, '/packs');
-                  },
-                  child: const Icon(Icons.download_outlined,
-                      color: Color(0xFFe2b96f), size: 20),
-                ),
+                if (kAiPracticeEnabled)
+                  GestureDetector(
+                    onTap: () {
+                      Navigator.pop(context);
+                      Navigator.pushNamed(context, '/packs');
+                    },
+                    child: const Icon(Icons.download_outlined,
+                        color: Color(0xFFe2b96f), size: 20),
+                  ),
               ],
             ),
             const SizedBox(height: 4),
@@ -110,23 +112,26 @@ class _PracticeLauncherSheet extends StatelessWidget {
                 );
               },
             ),
-            const SizedBox(height: 12),
-            _ModeCard(
-              icon: Icons.headphones_outlined,
-              title: 'Listen',
-              subtitle: 'Recite and get scored',
-              mode: 'listen',
-              showResume: false,
-              tierBadge: _tierLabel(DeviceCapabilityService.instance.tier),
-              onTap: () {
-                Navigator.pop(context);
-                Navigator.pushNamed(
-                  context,
-                  '/practice',
-                  arguments: {'kalaam': kalaam, 'mode': 'listen'},
-                );
-              },
-            ),
+            // Listen = AI scoring mode; paused behind kAiPracticeEnabled.
+            if (kAiPracticeEnabled) ...[
+              const SizedBox(height: 12),
+              _ModeCard(
+                icon: Icons.headphones_outlined,
+                title: 'Listen',
+                subtitle: 'Recite and get scored',
+                mode: 'listen',
+                showResume: false,
+                tierBadge: _tierLabel(DeviceCapabilityService.instance.tier),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.pushNamed(
+                    context,
+                    '/practice',
+                    arguments: {'kalaam': kalaam, 'mode': 'listen'},
+                  );
+                },
+              ),
+            ],
           ],
         ),
       ),

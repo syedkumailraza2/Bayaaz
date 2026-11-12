@@ -38,7 +38,7 @@ void main() async {
   await DeviceCapabilityService.instance.detectTier();
   // Fire-and-forget: expire stale coach pack, auto-download for high-tier,
   // then mark LlmService as loaded if the model file is on disk.
-  unawaited(_initCoachPack());
+  if (kAiPracticeEnabled) unawaited(_initCoachPack());
   runApp(
     MultiProvider(
       providers: [
@@ -254,6 +254,7 @@ class _SplashRouterState extends State<_SplashRouter>
       if (hasCachedContent) {
         kalaamProvider.loadFeed(category: kalaamProvider.selectedCategory);
       }
+      if (auth.isLoggedIn) auth.refreshMe();
       if (auth.isLoggedIn && connectivity.isOnline && IsarService.instance.isOpen) {
         OfflineSyncService.instance.syncAll();
       }
