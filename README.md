@@ -66,6 +66,25 @@ Each subproject has its own README with deeper detail.
 
 ---
 
+## Production setup
+
+| Piece | Host | Address |
+| --- | --- | --- |
+| API (`server/`) | Render | `https://api.mybayaaz.com` (custom domain → the Render service) |
+| Speech-to-text (`whisper-service/`) | Render | set `STT_URL` on the API service to its URL |
+| Website + admin panel (`landing/`) | Vercel | `https://www.mybayaaz.com` |
+| Media | Cloudflare R2 | `R2_*` env vars on the API |
+
+The app talks to `https://api.mybayaaz.com` (see `client/lib/config/app_config.dart`), so the API can move to a new Render service or host by repointing the `api` DNS record — no app release needed.
+
+**Website env vars (Vercel):** `NEXT_PUBLIC_SITE_URL=https://www.mybayaaz.com`, optional `NEXT_PUBLIC_API_URL` (defaults to `https://api.mybayaaz.com/api`), `NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION` (Search Console token).
+
+**Admins:** only admins can add kalaams. Grant the role with `cd server && node scripts/make-admin.js you@example.com` (`--revoke` to remove), then sign in at `https://www.mybayaaz.com/admin`. For Google sign-in on the admin panel, add `https://www.mybayaaz.com` (and `http://localhost:3000` for dev) under *Authorized JavaScript origins* of the Google OAuth web client.
+
+**AI practice** (Listen scoring + AI Coach) is paused via `kAiPracticeEnabled` in `client/lib/config/app_config.dart`.
+
+---
+
 ## Quick start
 
 ### 1. Server (`server/`)
@@ -78,7 +97,7 @@ npm run dev                # http://localhost:4000
 ```
 
 The server does not hold uploaded files — reference audio/video is
-uploaded by the client directly to Firebase Storage, and the server
+uploaded by the client directly to Cloudflare R2 (via a presigned URL), and the server
 just records the resulting download URL. This makes the API
 serverless-friendly (see Vercel section below).
 

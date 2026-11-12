@@ -1,5 +1,6 @@
 import Image from "next/image";
 import Link from "next/link";
+import { CATEGORIES, CATEGORY_INFO } from "@/lib/api";
 
 export default function Footer() {
   return (
@@ -21,6 +22,23 @@ export default function Footer() {
             BAYAAZ
           </span>
         </Link>
+        <nav
+          aria-label="Browse lyrics"
+          className="flex flex-wrap items-center justify-center gap-x-6 gap-y-3 text-sm"
+        >
+          <Link href="/kalaams" className="text-on-surface-variant hover:text-primary transition-colors">
+            All Kalaams
+          </Link>
+          {CATEGORIES.map((c) => (
+            <Link
+              key={c}
+              href={`/${c}`}
+              className="text-on-surface-variant hover:text-primary transition-colors"
+            >
+              {CATEGORY_INFO[c].label} Lyrics
+            </Link>
+          ))}
+        </nav>
         <div className="flex flex-wrap items-center justify-center gap-x-8 gap-y-3 text-sm">
           <Link
             href="/privacy"

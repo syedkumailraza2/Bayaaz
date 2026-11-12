@@ -22,12 +22,20 @@ export default function Nav() {
             BAYAAZ
           </span>
         </Link>
+        <div className="flex items-center gap-5">
+        <Link
+          href="/kalaams"
+          className="text-[14px] font-medium text-on-surface-variant hover:text-primary transition-colors"
+        >
+          Kalaams
+        </Link>
         <a
           href="/#get-started"
           className="bg-primary text-on-primary px-5 py-2 rounded-lg text-[14px] font-medium active:scale-95 transition-all"
         >
           Get Started
         </a>
+        </div>
       </div>
     </nav>
   );
