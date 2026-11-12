@@ -102,7 +102,11 @@ class ApiService {
       if (tag != null && tag.isNotEmpty) 'tag': tag,
     };
     final uri = Uri.parse('$kBaseUrl/kalaams').replace(queryParameters: params);
-    final res = await http.get(uri, headers: await _authHeaders());
+    // Bounded so a cold/slow dyno fails fast into the caller's cache fallback
+    // instead of hanging the feed refresh indefinitely.
+    final res = await http
+        .get(uri, headers: await _authHeaders())
+        .timeout(const Duration(seconds: 15));
     if (res.statusCode == 200) {
       final body = jsonDecode(res.body);
       // Tolerate the legacy array shape so old servers still work

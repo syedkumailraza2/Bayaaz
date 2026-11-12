@@ -724,7 +724,17 @@ class _FeedKalaamCard extends StatelessWidget {
     final cat = _CategoryGlyph.from(kalaam.category);
 
     return GestureDetector(
-      onTap: () => Navigator.pushNamed(context, '/kalaam', arguments: kalaam),
+      // Tapping a kalaam opens the read screen directly (practice mode kept in
+      // code but no longer reached via the detail screen).
+      onTap: () => Navigator.pushNamed(
+        context,
+        '/practice',
+        arguments: <String, dynamic>{
+          'kalaam': kalaam,
+          'mode': 'follow',
+          'startStanza': 0,
+        },
+      ),
       child: Container(
         margin: const EdgeInsets.only(bottom: 12),
         height: 118,
@@ -1550,7 +1560,17 @@ class _MyBayaazCard extends StatelessWidget {
     final cat = _CategoryGlyph.from(kalaam.category);
 
     return GestureDetector(
-      onTap: () => Navigator.pushNamed(context, '/kalaam', arguments: kalaam),
+      // Tapping a kalaam opens the read screen directly (practice mode kept in
+      // code but no longer reached via the detail screen).
+      onTap: () => Navigator.pushNamed(
+        context,
+        '/practice',
+        arguments: <String, dynamic>{
+          'kalaam': kalaam,
+          'mode': 'follow',
+          'startStanza': 0,
+        },
+      ),
       child: Container(
         margin: const EdgeInsets.only(bottom: 14),
         decoration: BoxDecoration(

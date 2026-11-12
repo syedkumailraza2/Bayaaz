@@ -15,7 +15,18 @@ const { matchTranscriptToKalaam, _tokens } = require('./kalaamMatcher');
 
 // The unified STT service serves the Vosk recognizer at /ws (FastAPI).
 // The path matters — connecting to the bare origin gets rejected.
-const VOSK_URL = process.env.VOSK_URL || 'ws://127.0.0.1:5001/ws';
+//
+// In production the STT runs as a SEPARATE service, so this MUST point at its
+// public URL (e.g. wss://bayaaz-stt.onrender.com/ws) — the localhost default is
+// dev-only. Prefer a single STT_URL base (shared with the /transcribe proxy);
+// fall back to the legacy VOSK_URL, then loopback.
+function _deriveVoskUrl() {
+  if (process.env.VOSK_URL) return process.env.VOSK_URL;
+  const base = process.env.STT_URL; // e.g. https://bayaaz-stt.onrender.com
+  if (base) return `${base.replace(/^http/, 'ws').replace(/\/+$/, '')}/ws`;
+  return 'ws://127.0.0.1:5001/ws';
+}
+const VOSK_URL = _deriveVoskUrl();
 const SAMPLE_RATE = parseInt(process.env.VOSK_SAMPLE_RATE || '16000', 10);
 
 // Persist cursor at most this often per session — every frame would hammer Mongo.
@@ -63,9 +74,16 @@ function _openBridge(socket, kalaam, scopeId, tag, onMatch) {
   };
   bridges.set(socket.id, state);
 
+  // Constrain the decoder to the kalaam's own vocabulary. The Hindi model
+  // otherwise snaps unknown Urdu words to common Hindi words ("papa", "naak")
+  // and the matcher never advances. Grammar biasing costs ~0 extra memory.
+  const grammar = grammarFromKalaam(kalaam);
+
   ws.on('open', () => {
-    console.log(`${tag} opened`);
-    ws.send(JSON.stringify({ config: { sample_rate: SAMPLE_RATE } }));
+    console.log(`${tag} opened${grammar ? ` (grammar: ${grammar.length} words)` : ' (open vocab)'}`);
+    ws.send(JSON.stringify({
+      config: { sample_rate: SAMPLE_RATE, ...(grammar ? { grammar } : {}) },
+    }));
     socket.emit('voice:ready', {});
   });
 

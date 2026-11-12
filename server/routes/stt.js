@@ -7,8 +7,12 @@ const upload = multer({
   limits: { fileSize: 50 * 1024 * 1024 },
 });
 
+// Unified STT service: /transcribe is served on the SAME host/port as the WS
+// recognizer. Prefer the shared STT_URL base; fall back to the legacy
+// WHISPER_HTTP_URL, then loopback (note: port 5001, the unified port — the old
+// 5002 split-service default is gone).
 const WHISPER_HTTP_URL =
-  process.env.WHISPER_HTTP_URL || 'http://127.0.0.1:5002';
+  process.env.WHISPER_HTTP_URL || process.env.STT_URL || 'http://127.0.0.1:5001';
 const WHISPER_TIMEOUT_MS = parseInt(process.env.WHISPER_TIMEOUT_MS || '60000', 10);
 
 // POST /api/stt/transcribe

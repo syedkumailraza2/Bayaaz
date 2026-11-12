@@ -218,18 +218,8 @@ class _SplashRouterState extends State<_SplashRouter>
 
     if (!mounted) return;
 
-    // 2b. Wait for the server to be warm before doing any network work.
-    // tryAutoLogin and the post-login syncs all need a live backend; firing
-    // them at a cold dyno fails fast and leaves the app in a bad state.
-    await warmup;
-    _coldStartHintTimer?.cancel();
-    if (mounted && _showColdStartHint) {
-      setState(() => _showColdStartHint = false);
-    }
-
-    if (!mounted) return;
-
-    // 3. Resolve auth.
+    // 2b. Resolve auth from local storage. This is a pure SharedPreferences
+    // read (no backend), so it's safe to do before the server is warm.
     await context.read<AuthProvider>().tryAutoLogin();
 
     if (!mounted) return;
@@ -237,10 +227,37 @@ class _SplashRouterState extends State<_SplashRouter>
     final auth = context.read<AuthProvider>();
     final connectivity = context.read<ConnectivityProvider>();
 
-    // 4. Fire-and-forget background sync if logged in & online.
-    if (auth.isLoggedIn && connectivity.isOnline && IsarService.instance.isOpen) {
-      unawaited(OfflineSyncService.instance.syncAll());
+    // 2c. Only block on Render's cold start when we have nothing to show. If the
+    // cache hydrated some kalaams, skip the warmup wait entirely and let the
+    // user into the app on cached content — the server keeps waking in the
+    // background (see 2d). Render's free dyno can take 30-50s, and there's no
+    // reason to make a returning user stare at the splash for that.
+    final hasCachedContent = kalaamProvider.feed.isNotEmpty;
+    if (!hasCachedContent) {
+      await warmup;
     }
+    _coldStartHintTimer?.cancel();
+    if (mounted && _showColdStartHint) {
+      setState(() => _showColdStartHint = false);
+    }
+
+    if (!mounted) return;
+
+    // 2d. Once the server is warm, refresh in the background. For cold-start
+    // users who were let in on cache, this pulls fresh kalaams as soon as the
+    // dyno responds — no manual pull-to-refresh needed — and runs the offline
+    // sync. Reuses the same coalesced warmup future, so it fires immediately
+    // when the server is already warm. Providers are app-scoped, so this is
+    // safe even after this splash widget is disposed.
+    unawaited(warmup.then((warm) {
+      if (!warm) return;
+      if (hasCachedContent) {
+        kalaamProvider.loadFeed(category: kalaamProvider.selectedCategory);
+      }
+      if (auth.isLoggedIn && connectivity.isOnline && IsarService.instance.isOpen) {
+        OfflineSyncService.instance.syncAll();
+      }
+    }));
 
     // 5. Subscribe to offline→online transitions for future re-syncs.
     _connectivitySub = connectivity.onChange.listen((online) {
