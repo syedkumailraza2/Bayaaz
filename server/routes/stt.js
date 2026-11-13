@@ -40,6 +40,7 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
     const response = await fetch(`${WHISPER_HTTP_URL}/transcribe`, {
       method: 'POST',
       body: form,
+      headers: process.env.STT_TOKEN ? { 'X-STT-Token': process.env.STT_TOKEN } : {},
       signal: controller.signal,
     });
     clearTimeout(timer);

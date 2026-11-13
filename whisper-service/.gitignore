@@ -15,3 +15,5 @@ model
 vosk-model-*/
 .DS_Store
 .pytest_cache/
+deploy/oracle/.env
+*.gguf

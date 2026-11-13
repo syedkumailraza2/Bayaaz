@@ -1,0 +1,28 @@
+# Bayaaz STT on a single VM: the Vosk service behind Caddy (automatic HTTPS).
+# Config comes from ./.env (STT_DOMAIN, STT_TOKEN, optional STT_* tuning).
+services:
+  stt:
+    build: ../..
+    image: bayaaz-stt
+    restart: unless-stopped
+    env_file: .env
+    expose:
+      - "5001"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - stt
+    ports:
+      - "80:80"
+      - "443:443"
+    env_file: .env
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

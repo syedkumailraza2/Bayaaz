@@ -11,7 +11,7 @@ const WebSocket = require('ws');
 const Session = require('../model/Session');
 const Kalaam = require('../model/Kalaam');
 const { splitKalaamHemistichs } = require('./hemistichSplit');
-const { matchTranscriptToKalaam, _tokens } = require('./kalaamMatcher');
+const { matchTranscriptToKalaam } = require('./kalaamMatcher');
 
 // The unified STT service serves the Vosk recognizer at /ws (FastAPI).
 // The path matters — connecting to the bare origin gets rejected.
@@ -44,15 +44,22 @@ function logTag(socketId, scopeId) {
 // Build a closed-vocabulary grammar list from the kalaam tokens. Vosk
 // uses this to constrain the decoder — much higher accuracy than open
 // recognition when we know what the host is reading.
+//
+// The Hindi model's vocabulary is Devanagari only. Roman-Urdu tokens
+// ("mujhe", "baba") are all dropped as "missing in vocabulary", which leaves
+// an empty grammar that recognises nothing — so only Devanagari tokens are
+// sent, and we fall back to open vocabulary when there aren't enough.
+const DEVANAGARI = /[\u0900-\u097F]/;
 function grammarFromKalaam(kalaam) {
   const seen = new Set();
   (kalaam.content || []).forEach((stanza) => {
     (stanza.lines || []).forEach((line) => {
-      _tokens(line).forEach((t) => seen.add(t));
+      // Raw words, not _tokens(): _tokens() romanises Devanagari.
+      String(line || '').split(/[\s,.!?؟،।"'()\-]+/).forEach((w) => {
+        if (w && DEVANAGARI.test(w)) seen.add(w);
+      });
     });
   });
-  // Empty grammar means open recognition — only send a grammar when we
-  // have enough vocabulary to be useful.
   return seen.size >= 4 ? Array.from(seen) : null;
 }
 
@@ -61,7 +68,11 @@ function grammarFromKalaam(kalaam) {
 // changes only back to the calling socket (no session, no persistence) —
 // it powers the single-user follow-my-voice teleprompter.
 function _openBridge(socket, kalaam, scopeId, tag, onMatch) {
-  const ws = new WebSocket(VOSK_URL);
+  // STT_TOKEN must match the STT service's own STT_TOKEN (shared secret,
+  // so a public STT host can't be used by anyone who finds its URL).
+  const ws = new WebSocket(VOSK_URL, process.env.STT_TOKEN
+    ? { headers: { 'X-STT-Token': process.env.STT_TOKEN } }
+    : undefined);
   const state = {
     ws,
     scopeId,
@@ -127,6 +138,11 @@ function _openBridge(socket, kalaam, scopeId, tag, onMatch) {
   });
 
   ws.on('close', (code, reason) => {
+    // 1013 = STT at its stream cap (see STT_MAX_STREAMS) — tell the app
+    // rather than leaving the host waiting for a voice:ready that never comes.
+    if (code === 1013) {
+      socket.emit('voice:error', { message: 'Voice follow is busy right now — please try again in a minute.' });
+    }
     console.log(`${tag} closed code=%s reason=%s frames=%d bytes=%d`,
       code, reason?.toString() || '', state.framesIn, state.bytesIn);
     if (bridges.get(socket.id) === state) bridges.delete(socket.id);

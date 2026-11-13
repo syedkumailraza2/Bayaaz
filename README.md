@@ -71,7 +71,7 @@ Each subproject has its own README with deeper detail.
 | Piece | Host | Address |
 | --- | --- | --- |
 | API (`server/`) | Render | `https://api.mybayaaz.com` (custom domain → the Render service) |
-| Speech-to-text (`whisper-service/`) | Render | set `STT_URL` on the API service to its URL |
+| Speech-to-text (`whisper-service/`) | Oracle Cloud (Always Free ARM VM) | `https://stt.mybayaaz.com`; set `STT_URL` + `STT_TOKEN` on the API. See [`whisper-service/deploy/oracle/README.md`](whisper-service/deploy/oracle/README.md) |
 | Website + admin panel (`landing/`) | Vercel | `https://www.mybayaaz.com` |
 | Media | Cloudflare R2 | `R2_*` env vars on the API |
 
@@ -122,97 +122,47 @@ setup so the same code works on both targets.
 
 ### 2. STT service (`whisper-service/`)
 
-A single FastAPI process serves both protocols on the same port:
-`WS /ws` for streaming Vosk (majlis voice-follow) and
-`POST /transcribe` for batch Whisper (listen mode).
+A single FastAPI process serves `WS /ws` (streaming Vosk for majlis
+voice-follow and solo follow-my-voice) and `POST /transcribe` (batch Vosk).
+Decoding runs on a thread pool, so one process uses every CPU core while
+sharing a single copy of the model in RAM.
 
 ```bash
 cd whisper-service
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-# Download a Vosk model (e.g. vosk-model-small-hi-0.22) into ./vosk-model-*/
-# and either rename it to ./model or set VOSK_MODEL_PATH in .env.
+bash scripts/fetch-models.sh          # downloads vosk-model-small-hi-0.22 → ./model
 cp .env.example .env
-
-# Dev runner — auto-reloads on file changes.
 uvicorn vosk_service:app --reload --host 0.0.0.0 --port 5001
-
-# Production runner.
-uvicorn vosk_service:app --host 0.0.0.0 --port $PORT
 ```
 
-The Node API then points at the **same host:port** for both flows:
+Point the Node API at it with a single base URL (the API derives `…/ws` and
+`…/transcribe` from it):
 
 ```
-VOSK_URL=ws://your-stt-host:5001/ws
-WHISPER_HTTP_URL=http://your-stt-host:5001
-WHISPER_TIMEOUT_MS=60000
+STT_URL=http://127.0.0.1:5001         # production: https://stt.mybayaaz.com
+STT_TOKEN=                            # must match the STT service's STT_TOKEN
 ```
 
-> The Phi-3 LLM weights (`Phi-3-mini-4k-instruct-q4.gguf`, ~2.2 GB) and the Vosk model directories are **not** committed — see [`.gitignore`](.gitignore). Download them locally.
+**Production** runs in Docker (`whisper-service/Dockerfile`) behind Caddy on an
+Oracle Cloud Always Free Ampere VM. Step-by-step guide:
+[`whisper-service/deploy/oracle/README.md`](whisper-service/deploy/oracle/README.md).
 
-#### Deploying the STT service to Render
+**Capacity** (measured on Apple M5, real Hindi speech, 15 s streams):
 
-A `render.yaml` blueprint is included. Two ways to use it:
+| Concurrent speakers | CPU | Memory | Lag behind live audio |
+| --- | --- | --- | --- |
+| 1 | 0.1 core | 238 MB | 0.03 s |
+| 10 | 0.9 core | 676 MB | 0.07 s |
+| 20 | 1.5 cores | 1.1 GB | 0.23 s |
+| 40 | 3 cores | 1.9 GB | 0.36 s |
 
-**Option A — Blueprint deploy (recommended):**
-1. Push the repo to GitHub.
-2. Render dashboard → **New + → Blueprint** → select the repo.
-3. Render reads `whisper-service/render.yaml`, picks Python 3.11.9 from
-   `runtime.txt`, runs `pip install -r requirements.txt` followed by
-   `scripts/fetch-models.sh` (downloads the Vosk model + warms the
-   Whisper cache), then starts uvicorn on the assigned `$PORT`.
-4. Health check at `/health` confirms the service is up.
+Tuning env vars (`STT_THREADS`, `STT_MAX_STREAMS`, `STT_MAX_ACTIVE`, `STT_BEAM`,
+…) are documented in `whisper-service/.env.example`. Streams over
+`STT_MAX_STREAMS` are refused with close code 1013, which the app shows as
+"voice follow is busy".
 
-**Option B — Manual:**
-1. Render → **New + → Web Service** → connect repo.
-2. **Root Directory**: `whisper-service`.
-3. **Runtime**: Python (auto-detected from `runtime.txt`).
-4. **Build Command**:
-   ```
-   pip install -r requirements.txt && bash scripts/fetch-models.sh
-   ```
-5. **Start Command**:
-   ```
-   uvicorn vosk_service:app --host 0.0.0.0 --port $PORT
-   ```
-6. **Health Check Path**: `/health`.
-
-##### Keep-alive (free tier sleeps after 15 min idle)
-
-`vosk_service.py` starts a background coroutine on app boot that pings
-`${RENDER_EXTERNAL_URL}/health` every `KEEP_ALIVE_INTERVAL_SECONDS`
-(default 600 = 10 min). Render auto-injects `RENDER_EXTERNAL_URL`, so
-no configuration is needed — the loop activates only when that env
-var is present, so dev and other hosts aren't affected.
-
-To disable (paid plans don't sleep, or you have an external uptime
-monitor like UptimeRobot pinging the URL): set
-`DISABLE_KEEP_ALIVE=1` in the service env.
-
-##### Wire the Node API to your Render URL
-
-After Render assigns your service a URL (e.g.
-`https://bayaaz-stt.onrender.com`), set in the Node server's env:
-
-```
-VOSK_URL=wss://bayaaz-stt.onrender.com/ws
-WHISPER_HTTP_URL=https://bayaaz-stt.onrender.com
-WHISPER_TIMEOUT_MS=60000
-```
-
-(Note `wss://` and `https://` — Render terminates TLS at its proxy.)
-
-##### Free-tier sizing caveats
-
-- 512 MB RAM is tight for Vosk + Whisper `base` loaded together. If
-  the service OOMs at boot, downgrade `WHISPER_MODEL_SIZE` to `tiny`.
-- 0.1 CPU is slow — long Whisper transcriptions can hit the
-  `WHISPER_TIMEOUT_MS` ceiling. Either raise the timeout on the Node
-  side or upgrade to Starter ($7/mo, 0.5 CPU, no sleep).
-- Render free tier has no persistent disk, so the model fetch runs on
-  every redeploy (~2–3 min added to deploy time).
+> The Phi-3 LLM weights (`*.gguf`) and Vosk model directories are **not** committed; see [`.gitignore`](.gitignore).
 
 ### 3. Flutter client (`client/`)
 
