@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Image from "next/image";
 import Nav from "@/components/Nav";
 import Footer from "@/components/Footer";
+import Splash from "@/components/Splash";
 import { softwareApplicationJsonLd } from "@/lib/seo";
 
 export const metadata: Metadata = {
@@ -20,6 +21,7 @@ export default function Home() {
           __html: JSON.stringify(softwareApplicationJsonLd()),
         }}
       />
+      <Splash />
       <Nav />
 
       {/* Hero — fits in viewport, no scroll required */}

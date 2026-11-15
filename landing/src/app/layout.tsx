@@ -1,6 +1,5 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono, Noto_Naskh_Arabic } from "next/font/google";
-import Splash from "@/components/Splash";
 import {
   organizationJsonLd,
   siteDescription,
@@ -63,20 +62,11 @@ export const metadata: Metadata = {
     title,
     description: siteShortDescription,
     locale: "en_US",
-    images: [
-      {
-        url: "/icon-512.png",
-        width: 512,
-        height: 512,
-        alt: `${siteName} app icon`,
-      },
-    ],
   },
   twitter: {
     card: "summary_large_image",
     title,
     description: siteShortDescription,
-    images: ["/icon-512.png"],
   },
   robots: {
     index: true,
@@ -89,6 +79,11 @@ export const metadata: Metadata = {
       "max-video-preview": -1,
     },
   },
+  // Google Search Console: set NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION to the
+  // token from the "HTML tag" verification method.
+  ...(process.env.NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION
+    ? { verification: { google: process.env.NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION } }
+    : {}),
   formatDetection: {
     email: false,
     address: false,
@@ -116,7 +111,6 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} ${notoNaskh.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col font-sans">
-        <Splash />
         {children}
         <script
           type="application/ld+json"

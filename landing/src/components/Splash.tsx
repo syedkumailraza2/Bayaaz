@@ -6,6 +6,15 @@ export default function Splash() {
   const [phase, setPhase] = useState<"in" | "out" | "gone">("in");
 
   useEffect(() => {
+    // Show the intro once per browser session only — repeat views (and
+    // in-site navigation back to home) go straight to the content.
+    try {
+      if (sessionStorage.getItem("bayaaz:splash-seen")) {
+        setPhase("gone");
+        return;
+      }
+      sessionStorage.setItem("bayaaz:splash-seen", "1");
+    } catch {}
     document.body.style.overflow = "hidden";
     const fadeOut = window.setTimeout(() => setPhase("out"), 2400);
     const unmount = window.setTimeout(() => {

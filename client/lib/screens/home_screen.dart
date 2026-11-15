@@ -158,7 +158,10 @@ class _HomeScreenState extends State<HomeScreen> {
             child: _HomeNavBar(
               currentIndex: _currentIndex,
               onTap: _onNavTap,
-              onCreate: () => Navigator.pushNamed(context, '/add'),
+              // Only admins can add kalaams (server enforces it too).
+              onCreate: context.watch<AuthProvider>().isAdmin
+                  ? () => Navigator.pushNamed(context, '/add')
+                  : null,
             ),
           ),
         ],
@@ -724,7 +727,17 @@ class _FeedKalaamCard extends StatelessWidget {
     final cat = _CategoryGlyph.from(kalaam.category);
 
     return GestureDetector(
-      onTap: () => Navigator.pushNamed(context, '/kalaam', arguments: kalaam),
+      // Tapping a kalaam opens the read screen directly (practice mode kept in
+      // code but no longer reached via the detail screen).
+      onTap: () => Navigator.pushNamed(
+        context,
+        '/practice',
+        arguments: <String, dynamic>{
+          'kalaam': kalaam,
+          'mode': 'follow',
+          'startStanza': 0,
+        },
+      ),
       child: Container(
         margin: const EdgeInsets.only(bottom: 12),
         height: 118,
@@ -1023,17 +1036,19 @@ class _CategoryGlyph {
 class _HomeNavBar extends StatelessWidget {
   final int currentIndex;
   final void Function(int) onTap;
-  final VoidCallback onCreate;
+  /// Null hides the create pill (non-admin users).
+  final VoidCallback? onCreate;
 
   const _HomeNavBar({
     required this.currentIndex,
     required this.onTap,
-    required this.onCreate,
+    this.onCreate,
   });
 
   @override
   Widget build(BuildContext context) {
     final palette = _Palette.of(context);
+    final onCreate = this.onCreate;
 
     return Row(
       children: [
@@ -1073,6 +1088,7 @@ class _HomeNavBar extends StatelessWidget {
             ),
           ),
         ),
+        if (onCreate != null) ...[
         const SizedBox(width: 11),
         _PressableScale(
           onTap: onCreate,
@@ -1102,6 +1118,7 @@ class _HomeNavBar extends StatelessWidget {
             ),
           ),
         ),
+        ],
       ],
     );
   }
@@ -1411,10 +1428,15 @@ class _MyKalaamsList extends StatelessWidget {
       );
     }
     if (provider.myKalaams.isEmpty) {
-      return const Padding(
-        padding: EdgeInsets.all(24),
+      final isAdmin = context.watch<AuthProvider>().isAdmin;
+      return Padding(
+        padding: const EdgeInsets.all(24),
         child: Center(
-          child: _EmptyRow(message: 'No kalaams yet. Tap Create to add one.'),
+          child: _EmptyRow(
+            message: isAdmin
+                ? 'No kalaams yet. Tap Create to add one.'
+                : 'You haven\'t added any kalaams.',
+          ),
         ),
       );
     }
@@ -1550,7 +1572,17 @@ class _MyBayaazCard extends StatelessWidget {
     final cat = _CategoryGlyph.from(kalaam.category);
 
     return GestureDetector(
-      onTap: () => Navigator.pushNamed(context, '/kalaam', arguments: kalaam),
+      // Tapping a kalaam opens the read screen directly (practice mode kept in
+      // code but no longer reached via the detail screen).
+      onTap: () => Navigator.pushNamed(
+        context,
+        '/practice',
+        arguments: <String, dynamic>{
+          'kalaam': kalaam,
+          'mode': 'follow',
+          'startStanza': 0,
+        },
+      ),
       child: Container(
         margin: const EdgeInsets.only(bottom: 14),
         decoration: BoxDecoration(

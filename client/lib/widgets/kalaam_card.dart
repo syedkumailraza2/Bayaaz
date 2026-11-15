@@ -34,7 +34,18 @@ class KalaamCard extends StatelessWidget {
     final isSaved = context.watch<KalaamProvider>().isSaved(kalaam.id);
 
     return GestureDetector(
-      onTap: onPick ?? () => Navigator.pushNamed(context, '/kalaam', arguments: kalaam),
+      // Tapping a kalaam opens the read screen directly (practice mode is kept
+      // in code but no longer surfaced via the detail screen).
+      onTap: onPick ??
+          () => Navigator.pushNamed(
+                context,
+                '/practice',
+                arguments: <String, dynamic>{
+                  'kalaam': kalaam,
+                  'mode': 'follow',
+                  'startStanza': 0,
+                },
+              ),
       child: Container(
         margin: const EdgeInsets.only(bottom: 14),
         decoration: BoxDecoration(

@@ -3,7 +3,7 @@
 // pages. Override the URL at deploy time via NEXT_PUBLIC_SITE_URL.
 
 export const siteUrl = (
-  process.env.NEXT_PUBLIC_SITE_URL ?? "https://bayaaz.app"
+  process.env.NEXT_PUBLIC_SITE_URL ?? "https://www.mybayaaz.com"
 ).replace(/\/$/, "");
 
 export const siteName = "BAYAAZ";
@@ -38,7 +38,12 @@ export const siteKeywords = [
   "poetry teleprompter",
   "recitation practice",
   "voice follow",
-  "Noto Naskh",
+  "noha lyrics",
+  "nauha lyrics",
+  "marsiya lyrics",
+  "qasida lyrics",
+  "manqabat",
+  "Roman Urdu noha",
 ];
 
 export const contactEmail = "kumailappdev@gmail.com";
@@ -83,12 +88,20 @@ export function softwareApplicationJsonLd() {
       price: "0",
       priceCurrency: "USD",
     },
-    aggregateRating: {
-      "@type": "AggregateRating",
-      ratingValue: "4.9",
-      ratingCount: "12000",
-      bestRating: "5",
-      worstRating: "1",
-    },
+    // No aggregateRating: Google only allows real, verifiable review data
+    // here. Add it back once there are actual store ratings to cite.
+  };
+}
+
+export function breadcrumbJsonLd(items: { name: string; path: string }[]) {
+  return {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: items.map((it, i) => ({
+      "@type": "ListItem",
+      position: i + 1,
+      name: it.name,
+      item: `${siteUrl}${it.path}`,
+    })),
   };
 }

@@ -15,6 +15,12 @@ Run:
 Env:
     VOSK_MODEL_PATH     path to unzipped Vosk model (default ./model)
     VOSK_SAMPLE_RATE    default PCM rate (default 16000)
+    STT_THREADS         decoder threads (default: CPU count)
+    STT_MAX_STREAMS     concurrent /ws streams before refusing (default threads*8)
+    STT_PARTIAL_INTERVAL_MS  min gap between partial results (default 300)
+    STT_MAX_BACKLOG_SECONDS  audio a lagging stream may queue (default 3)
+    STT_MAX_ACTIVE / STT_BEAM  decoder search width (default 4000 / 11)
+    STT_TOKEN           shared secret required in the X-STT-Token header
     PORT                bind port — informational only; the actual port
                         is set on the uvicorn command line (default 5001)
 """
@@ -24,12 +30,20 @@ import io
 import json
 import logging
 import os
+import re
+import shutil
+import tempfile
+import time
 import urllib.request
 import wave
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
-from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
+import hmac
+
+from fastapi import FastAPI, File, Form, Header, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from vosk import KaldiRecognizer, Model, SetLogLevel
 
@@ -37,6 +51,30 @@ from vosk import KaldiRecognizer, Model, SetLogLevel
 
 MODEL_PATH = os.getenv("VOSK_MODEL_PATH", "model")
 DEFAULT_SAMPLE_RATE = int(os.getenv("VOSK_SAMPLE_RATE", "16000"))
+
+# Decoder threads. Vosk releases the GIL inside AcceptWaveform, so threads
+# scale ~linearly across cores while sharing ONE copy of the model in RAM
+# (separate uvicorn workers would each load their own ~200MB model).
+STT_THREADS = int(os.getenv("STT_THREADS", "0")) or (os.cpu_count() or 1)
+# Hard cap on concurrent /ws streams; extra connections are refused with
+# close code 1013 ("try again later") instead of degrading everyone.
+MAX_STREAMS = int(os.getenv("STT_MAX_STREAMS", "0")) or STT_THREADS * 8
+# Send partial transcripts at most this often. Building a partial on every
+# 100ms frame was ~3/4 of per-stream CPU in load tests.
+PARTIAL_INTERVAL = float(os.getenv("STT_PARTIAL_INTERVAL_MS", "300")) / 1000
+# If a stream falls further behind than this, drop its oldest audio rather
+# than buffering without bound (memory) and lagging further (latency).
+MAX_BACKLOG_SECONDS = float(os.getenv("STT_MAX_BACKLOG_SECONDS", "3"))
+# Merge queued frames into one decoder call, up to this much audio.
+MAX_BATCH_SECONDS = 1.0
+# Decoder search width. Benchmarked on Hindi speech: 4000/11 used ~32% less
+# CPU than the model default 7000/13 with an identical transcript; going
+# lower gave no further saving. Set both to 0 to keep the model's own values.
+# Shared secret with the backend (sent as the X-STT-Token header). Unset =
+# no auth, fine for localhost; ALWAYS set it on a public host.
+STT_TOKEN = os.getenv("STT_TOKEN", "")
+MAX_ACTIVE = int(os.getenv("STT_MAX_ACTIVE", "4000"))
+BEAM = float(os.getenv("STT_BEAM", "11"))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,8 +92,43 @@ if not os.path.isdir(MODEL_PATH):
         "Download a model from https://alphacephei.com/vosk/models and "
         "symlink/copy it as ./model or set VOSK_MODEL_PATH."
     )
-vosk_model = Model(MODEL_PATH)
-log.info("vosk model loaded")
+
+
+def _tuned_model_dir(src: str) -> str:
+    """Return a model dir whose conf/model.conf has our decoder limits.
+
+    Vosk only reads these from model.conf, so we build a throwaway overlay
+    (symlinks to the big files + a patched copy of conf/) rather than
+    editing the model in place.
+    """
+    if not MAX_ACTIVE or not BEAM:
+        return src
+    src = os.path.realpath(src)
+    conf_dir = os.path.join(src, "conf")
+    if not os.path.isfile(os.path.join(conf_dir, "model.conf")):
+        return src
+    out = tempfile.mkdtemp(prefix="vosk-model-")
+    for entry in os.listdir(src):
+        if entry != "conf":
+            os.symlink(os.path.join(src, entry), os.path.join(out, entry))
+    shutil.copytree(conf_dir, os.path.join(out, "conf"))
+    path = os.path.join(out, "conf", "model.conf")
+    with open(path) as f:
+        conf = f.read()
+    conf = re.sub(r"--max-active=\d+", f"--max-active={MAX_ACTIVE}", conf)
+    conf = re.sub(r"--beam=[\d.]+", f"--beam={BEAM}", conf)
+    with open(path, "w") as f:
+        f.write(conf)
+    return out
+
+
+vosk_model = Model(_tuned_model_dir(MODEL_PATH))
+decoder_pool = ThreadPoolExecutor(max_workers=STT_THREADS, thread_name_prefix="vosk")
+active_streams = 0
+log.info(
+    "vosk model loaded (threads=%d max_streams=%d max_active=%s beam=%s)",
+    STT_THREADS, MAX_STREAMS, MAX_ACTIVE or "model", BEAM or "model",
+)
 
 # Single-model service: Vosk serves BOTH the streaming /ws path (practice mode)
 # and the batch /transcribe path (listen mode). We used to load faster-whisper
@@ -130,7 +203,7 @@ app = FastAPI(
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "streams": active_streams, "max_streams": MAX_STREAMS}
 
 
 # ── Vosk WebSocket — majlis voice-follow ──────────────────────────────────────
@@ -142,88 +215,159 @@ def make_recognizer(sample_rate: int, grammar: Optional[List[str]]) -> KaldiReco
         )
     else:
         rec = KaldiRecognizer(vosk_model, sample_rate)
-    rec.SetWords(True)
+    # Word timings aren't used by the backend matcher (it reads text/partial).
+    rec.SetWords(False)
     return rec
+
+
+def _decode(rec: KaldiRecognizer, audio: bytes, want_partial: bool):
+    """Runs in the decoder pool. Returns (final_json | None, partial_json | None)."""
+    if rec.AcceptWaveform(audio):
+        return rec.Result(), None
+    return None, (rec.PartialResult() if want_partial else None)
+
+
+def _authorized(token: Optional[str]) -> bool:
+    return not STT_TOKEN or hmac.compare_digest(token or "", STT_TOKEN)
+
+
+async def _run(fn, *args):
+    return await asyncio.get_running_loop().run_in_executor(decoder_pool, fn, *args)
 
 
 @app.websocket("/ws")
 async def ws_recognize(ws: WebSocket):
+    global active_streams
+    if not _authorized(ws.headers.get("x-stt-token")):
+        await ws.close(code=1008)  # policy violation — rejected before accept
+        return
     await ws.accept()
-    client = f"{ws.client.host}:{ws.client.port}" if ws.client else "?"
-    log.info("[%s] connected", client)
+    client = ws.headers.get("x-forwarded-for") or (
+        f"{ws.client.host}:{ws.client.port}" if ws.client else "?")
+    if active_streams >= MAX_STREAMS:
+        log.warning("[%s] refused: %d/%d streams busy", client, active_streams, MAX_STREAMS)
+        await ws.close(code=1013, reason="stt busy")
+        return
+    active_streams += 1
+    log.info("[%s] connected (%d/%d streams)", client, active_streams, MAX_STREAMS)
 
-    sample_rate = DEFAULT_SAMPLE_RATE
-    rec = make_recognizer(sample_rate, None)
+    # The reader task only enqueues; the decoder loop below drains the queue
+    # through the thread pool. Audio, config and eof share one queue so their
+    # order is preserved.
+    queue: deque = deque()
+    wake = asyncio.Event()
+    state = {"backlog": 0, "sample_rate": DEFAULT_SAMPLE_RATE, "closed": False}
+
+    def push(item):
+        queue.append(item)
+        wake.set()
+
+    async def reader():
+        try:
+            while True:
+                message = await ws.receive()
+                if message["type"] == "websocket.disconnect":
+                    break
+                if (data := message.get("bytes")) is not None:
+                    push(("audio", data))
+                    state["backlog"] += len(data)
+                    cap = int(MAX_BACKLOG_SECONDS * state["sample_rate"] * 2)
+                    dropped = 0
+                    while state["backlog"] > cap and queue and queue[0][0] == "audio":
+                        state["backlog"] -= len(queue[0][1])
+                        dropped += len(queue.popleft()[1])
+                    if dropped:
+                        log.warning("[%s] behind — dropped %d bytes of old audio", client, dropped)
+                    continue
+                text_frame = message.get("text")
+                if not text_frame:
+                    continue
+                try:
+                    data = json.loads(text_frame)
+                except Exception:
+                    log.warning("[%s] non-JSON text frame: %r", client, text_frame[:80])
+                    continue
+                if data.get("eof") == 1:
+                    push(("eof", None))
+                    break
+                if isinstance(data.get("config"), dict):
+                    cfg = data["config"]
+                    state["sample_rate"] = int(cfg.get("sample_rate", state["sample_rate"]))
+                    push(("config", cfg))
+        except Exception:
+            pass  # disconnect / transport error — the decoder loop drains and exits
+        finally:
+            state["closed"] = True
+            wake.set()
+
+    reader_task = asyncio.create_task(reader())
+    rec = make_recognizer(DEFAULT_SAMPLE_RATE, None)
     bytes_received = 0
     last_partial = ""
+    last_partial_at = 0.0
 
     try:
         while True:
-            message = await ws.receive()
-            # FastAPI / Starlette delivers a dict — pick bytes or text manually.
-            if message["type"] == "websocket.disconnect":
-                break
-
-            if (data_bytes := message.get("bytes")) is not None:
-                bytes_received += len(data_bytes)
-                if rec.AcceptWaveform(data_bytes):
-                    result = rec.Result()
-                    try:
-                        text = json.loads(result).get("text", "")
-                    except Exception:
-                        text = ""
-                    if text:
-                        log.info("[%s] final: %r", client, text)
-                    await ws.send_text(result)
-                    last_partial = ""
-                else:
-                    partial_raw = rec.PartialResult()
-                    try:
-                        partial = json.loads(partial_raw).get("partial", "")
-                    except Exception:
-                        partial = ""
-                    if partial and partial != last_partial:
-                        log.info("[%s] partial: %r", client, partial)
-                        last_partial = partial
-                        await ws.send_text(partial_raw)
+            if not queue:
+                if state["closed"]:
+                    break
+                wake.clear()
+                await wake.wait()
                 continue
 
-            text_frame = message.get("text")
-            if not text_frame:
+            kind, payload = queue.popleft()
+
+            if kind == "config":
+                grammar = payload.get("grammar") if isinstance(payload.get("grammar"), list) else None
+                rec = make_recognizer(state["sample_rate"], grammar)
+                log.info(
+                    "[%s] reconfigured sample_rate=%d grammar=%s", client, state["sample_rate"],
+                    f"{len(grammar)} words" if grammar else "none",
+                )
                 continue
 
-            try:
-                data = json.loads(text_frame)
-            except Exception:
-                log.warning("[%s] non-JSON text frame: %r", client, text_frame[:80])
-                continue
-
-            if data.get("eof") == 1:
-                final = rec.FinalResult()
-                try:
-                    text = json.loads(final).get("text", "")
-                except Exception:
-                    text = ""
-                log.info("[%s] eof — final: %r (bytes=%d)", client, text, bytes_received)
+            if kind == "eof":
+                final = await _run(rec.FinalResult)
+                log.info("[%s] eof — final: %r (bytes=%d)", client,
+                         json.loads(final).get("text", ""), bytes_received)
                 await ws.send_text(final)
                 break
 
-            cfg = data.get("config")
-            if isinstance(cfg, dict):
-                sr = int(cfg.get("sample_rate", sample_rate))
-                grammar = cfg.get("grammar") if isinstance(cfg.get("grammar"), list) else None
-                sample_rate = sr
-                rec = make_recognizer(sample_rate, grammar)
-                log.info(
-                    "[%s] reconfigured sample_rate=%d grammar=%s",
-                    client,
-                    sample_rate,
-                    f"{len(grammar)} phrases" if grammar else "none",
-                )
-    except WebSocketDisconnect as e:
-        log.info("[%s] disconnected (%s)", client, e.code)
+            # Audio: merge whatever else is queued (when behind) into one call.
+            chunks = [payload]
+            size = len(payload)
+            limit = int(MAX_BATCH_SECONDS * state["sample_rate"] * 2)
+            while queue and queue[0][0] == "audio" and size < limit:
+                nxt = queue.popleft()[1]
+                chunks.append(nxt)
+                size += len(nxt)
+            state["backlog"] = max(0, state["backlog"] - size)
+            bytes_received += size
+
+            now = time.monotonic()
+            want_partial = now - last_partial_at >= PARTIAL_INTERVAL
+            final, partial_raw = await _run(_decode, rec, b"".join(chunks), want_partial)
+
+            if final is not None:
+                text = json.loads(final).get("text", "")
+                if text:
+                    log.info("[%s] final: %r", client, text)
+                await ws.send_text(final)
+                last_partial = ""
+            elif partial_raw is not None:
+                last_partial_at = now
+                partial = json.loads(partial_raw).get("partial", "")
+                if partial and partial != last_partial:
+                    last_partial = partial
+                    await ws.send_text(partial_raw)
+    except (WebSocketDisconnect, RuntimeError) as e:
+        log.info("[%s] disconnected (%s)", client, e)
     except Exception:
         log.exception("[%s] handler crashed", client)
+    finally:
+        active_streams -= 1
+        reader_task.cancel()
+        log.info("[%s] closed (%d/%d streams)", client, active_streams, MAX_STREAMS)
 
 
 # ── Vosk HTTP batch — listen mode ─────────────────────────────────────────────
@@ -247,7 +391,6 @@ def _vosk_transcribe_wav(audio_bytes: bytes) -> str:
                 wf.getnchannels(), wf.getsampwidth(),
             )
         rec = KaldiRecognizer(vosk_model, sample_rate)
-        rec.SetWords(True)
         while True:
             frames = wf.readframes(4000)
             if not frames:
@@ -257,7 +400,6 @@ def _vosk_transcribe_wav(audio_bytes: bytes) -> str:
         # Not a WAV container — feed the raw bytes as PCM at the default rate.
         log.warning("transcribe: unparseable WAV, treating as raw PCM")
         rec = KaldiRecognizer(vosk_model, DEFAULT_SAMPLE_RATE)
-        rec.SetWords(True)
         rec.AcceptWaveform(audio_bytes)
 
     return json.loads(rec.FinalResult()).get("text", "")
@@ -270,7 +412,10 @@ async def transcribe(
     # initial-prompt equivalent, so it's currently unused; phrase biasing would
     # need the full reference lines passed as a Vosk grammar instead.
     hint: Optional[str] = Form(default=None),
+    x_stt_token: Optional[str] = Header(default=None),
 ):
+    if not _authorized(x_stt_token):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
     audio_bytes = await audio.read()
     if not audio_bytes:
         return {"transcript": ""}
@@ -278,7 +423,7 @@ async def transcribe(
     try:
         # Vosk decoding is CPU-bound; offload to a thread so the event loop
         # stays free for concurrent /ws sessions.
-        transcript = await asyncio.to_thread(_vosk_transcribe_wav, audio_bytes)
+        transcript = await _run(_vosk_transcribe_wav, audio_bytes)
         log.info("vosk transcript: %r", transcript)
         return {"transcript": transcript}
     except Exception as e:

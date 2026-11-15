@@ -102,7 +102,11 @@ class ApiService {
       if (tag != null && tag.isNotEmpty) 'tag': tag,
     };
     final uri = Uri.parse('$kBaseUrl/kalaams').replace(queryParameters: params);
-    final res = await http.get(uri, headers: await _authHeaders());
+    // Bounded so a cold/slow dyno fails fast into the caller's cache fallback
+    // instead of hanging the feed refresh indefinitely.
+    final res = await http
+        .get(uri, headers: await _authHeaders())
+        .timeout(const Duration(seconds: 15));
     if (res.statusCode == 200) {
       final body = jsonDecode(res.body);
       // Tolerate the legacy array shape so old servers still work
@@ -319,6 +323,15 @@ class ApiService {
     );
     if (res.statusCode == 200) return jsonDecode(res.body);
     throw Exception('Failed to record view');
+  }
+
+  /// Fetches the signed-in user's profile (incl. role) from the server.
+  static Future<Map<String, dynamic>> getMe() async {
+    final res = await http
+        .get(Uri.parse('$kBaseUrl/auth/me'), headers: await _authHeaders())
+        .timeout(const Duration(seconds: 15));
+    if (res.statusCode == 200) return jsonDecode(res.body);
+    throw Exception(_parseBody(res)['message'] ?? 'Failed to load profile');
   }
 
   /// Patches the signed-in user's profile. Pass `avatar: null` (with

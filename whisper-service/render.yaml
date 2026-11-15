@@ -23,6 +23,13 @@ services:
         value: ./model
       - key: VOSK_SAMPLE_RATE
         value: "16000"
-      - key: KEEP_ALIVE_INTERVAL_SECONDS
-        value: "600"           # 10 min — under Render's 15 min idle limit
+      # Keep-alive is DISABLED on free tier: a self-ping every 10 min keeps the
+      # service always-on (~730 instance-hours/month), and the free tier's
+      # 750h/month cap is shared across ALL free services — two always-on
+      # services blow past it and Render *suspends* them mid-month. Letting the
+      # service sleep when idle (cold start ~50s on first request) keeps usage
+      # well under the cap. Re-enable (delete this / set to "0") only on a paid
+      # plan, where there's no instance-hour cap.
+      - key: DISABLE_KEEP_ALIVE
+        value: "1"
       # RENDER_EXTERNAL_URL is auto-injected, no need to set it.

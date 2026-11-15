@@ -3,6 +3,8 @@ const jwt = require('jsonwebtoken');
 const Kalaam = require('../model/Kalaam');
 const User = require('../model/User');
 const auth = require('../middleware/auth');
+const requireAdmin = require('../middleware/requireAdmin');
+const { isAdmin } = require('../middleware/requireAdmin');
 const r2 = require('../services/r2');
 
 const router = express.Router();
@@ -43,6 +45,28 @@ const loadSavedSet = async (userId) => {
   return new Set(u.savedKalaams.map(id => id.toString()));
 };
 
+// Owner of the kalaam, or an admin (admins manage everyone's content).
+const canManage = async (kalaam, userId) =>
+  kalaam.author.toString() === userId || (await isAdmin(userId));
+
+// Shared filter for the public feed and the admin list.
+const buildFilter = ({ q, tag, category }, { includePrivate = false } = {}) => {
+  const filter = includePrivate ? {} : { isPublic: true };
+  if (category) filter.category = category;
+  if (tag) filter.tags = tag;
+  if (q && q.trim()) {
+    const escaped = q.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(escaped, 'i');
+    filter.$or = [
+      { title: regex },
+      { poet: regex },
+      { tags: regex },
+      { 'content.lines': regex },
+    ];
+  }
+  return filter;
+};
+
 const fmt = (doc, userId, savedSet = null) =>
   Kalaam.formatForClient(doc, userId, savedSet);
 const fmtMany = (docs, userId, savedSet = null) =>
@@ -79,20 +103,7 @@ router.get('/', async (req, res) => {
     const page = Math.max(1, parseInt(pageRaw, 10) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(limitRaw, 10) || 20));
 
-    const filter = { isPublic: true };
-    if (category) filter.category = category;
-    if (tag) filter.tags = tag;
-
-    if (q && q.trim()) {
-      const escaped = q.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const regex = new RegExp(escaped, 'i');
-      filter.$or = [
-        { title: regex },
-        { poet: regex },
-        { tags: regex },
-        { 'content.lines': regex },
-      ];
-    }
+    const filter = buildFilter({ q, tag, category });
 
     const userId = tryAuth(req);
     const [items, total, savedSet] = await Promise.all([
@@ -107,6 +118,56 @@ router.get('/', async (req, res) => {
 
     res.json({
       items: fmtMany(items, userId, savedSet),
+      page,
+      limit,
+      total,
+      hasMore: page * limit < total,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// GET /api/kalaams/index — lightweight list of every public kalaam, used by
+// the website to build its sitemap and static kalaam pages. No pagination:
+// the projection is tiny (a few hundred bytes per kalaam).
+router.get('/index', async (req, res) => {
+  try {
+    const items = await Kalaam.find({ isPublic: true })
+      .select('title category poet updatedAt')
+      .sort({ updatedAt: -1 })
+      .lean();
+    res.set('Cache-Control', 'public, max-age=300');
+    res.json(items.map(k => ({
+      id: String(k._id),
+      title: k.title,
+      category: k.category,
+      poet: k.poet || null,
+      updatedAt: k.updatedAt,
+    })));
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// GET /api/kalaams/admin/all — admin-only list incl. private kalaams.
+// Same query params as the public feed (q, tag, category, page, limit).
+router.get('/admin/all', auth, requireAdmin, async (req, res) => {
+  try {
+    const { q, tag, category, page: pageRaw = '1', limit: limitRaw = '50' } = req.query;
+    const page = Math.max(1, parseInt(pageRaw, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(limitRaw, 10) || 50));
+    const filter = buildFilter({ q, tag, category }, { includePrivate: true });
+    const [items, total] = await Promise.all([
+      Kalaam.find(filter)
+        .populate('author', 'name avatar')
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit),
+      Kalaam.countDocuments(filter),
+    ]);
+    res.json({
+      items: fmtMany(items, req.user.id, new Set()),
       page,
       limit,
       total,
@@ -240,12 +301,12 @@ router.post('/:id/view', async (req, res) => {
   }
 });
 
-// PATCH /api/kalaams/:id/visibility — toggle public/private (owner only)
+// PATCH /api/kalaams/:id/visibility — toggle public/private (owner or admin)
 router.patch('/:id/visibility', auth, async (req, res) => {
   try {
     const kalaam = await Kalaam.findById(req.params.id);
     if (!kalaam) return res.status(404).json({ message: 'Not found' });
-    if (kalaam.author.toString() !== req.user.id) return res.status(403).json({ message: 'Forbidden' });
+    if (!(await canManage(kalaam, req.user.id))) return res.status(403).json({ message: 'Forbidden' });
     kalaam.isPublic = !kalaam.isPublic;
     await kalaam.save();
     await kalaam.populate('author', 'name avatar');
@@ -281,7 +342,7 @@ router.get('/:id', async (req, res) => {
     const userId = tryAuth(req);
 
     if (!kalaam.isPublic) {
-      if (!userId || kalaam.author._id.toString() !== userId) {
+      if (!userId || (kalaam.author._id.toString() !== userId && !(await isAdmin(userId)))) {
         return res.status(403).json({ message: 'Private kalaam' });
       }
     }
@@ -293,8 +354,8 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// POST /api/kalaams — create
-router.post('/', auth, async (req, res) => {
+// POST /api/kalaams — create (admins only)
+router.post('/', auth, requireAdmin, async (req, res) => {
   try {
     const { title, content, category, isPublic, poet, tags } = req.body;
     const kalaam = await Kalaam.create({
@@ -315,12 +376,12 @@ router.post('/', auth, async (req, res) => {
   }
 });
 
-// PUT /api/kalaams/:id — update (owner only)
+// PUT /api/kalaams/:id — update (owner or admin)
 router.put('/:id', auth, async (req, res) => {
   try {
     const kalaam = await Kalaam.findById(req.params.id);
     if (!kalaam) return res.status(404).json({ message: 'Not found' });
-    if (kalaam.author.toString() !== req.user.id) return res.status(403).json({ message: 'Forbidden' });
+    if (!(await canManage(kalaam, req.user.id))) return res.status(403).json({ message: 'Forbidden' });
 
     const { title, content, category, isPublic, poet, tags } = req.body;
     Object.assign(kalaam, { title, content, category, isPublic, poet, tags: Array.isArray(tags) ? tags : kalaam.tags });
@@ -333,12 +394,12 @@ router.put('/:id', auth, async (req, res) => {
   }
 });
 
-// DELETE /api/kalaams/:id — delete (owner only)
+// DELETE /api/kalaams/:id — delete (owner or admin)
 router.delete('/:id', auth, async (req, res) => {
   try {
     const kalaam = await Kalaam.findById(req.params.id);
     if (!kalaam) return res.status(404).json({ message: 'Not found' });
-    if (kalaam.author.toString() !== req.user.id) return res.status(403).json({ message: 'Forbidden' });
+    if (!(await canManage(kalaam, req.user.id))) return res.status(403).json({ message: 'Forbidden' });
 
     // The reference media (if any) lives in Supabase Storage; the client
     // is responsible for deleting the corresponding object before/after
@@ -365,7 +426,7 @@ router.post('/:id/reference/presign', auth, async (req, res) => {
     const { extension } = req.body || {};
     const kalaam = await Kalaam.findById(req.params.id);
     if (!kalaam) return res.status(404).json({ message: 'Not found' });
-    if (kalaam.author.toString() !== req.user.id) {
+    if (!(await canManage(kalaam, req.user.id))) {
       return res.status(403).json({ message: 'Forbidden' });
     }
     const presign = await r2.presignReferenceUpload({
@@ -402,7 +463,7 @@ router.post('/:id/reference', auth, async (req, res) => {
 
     const kalaam = await Kalaam.findById(req.params.id);
     if (!kalaam) return res.status(404).json({ message: 'Not found' });
-    if (kalaam.author.toString() !== req.user.id) {
+    if (!(await canManage(kalaam, req.user.id))) {
       return res.status(403).json({ message: 'Forbidden' });
     }
 
@@ -441,7 +502,7 @@ router.delete('/:id/reference', auth, async (req, res) => {
   try {
     const kalaam = await Kalaam.findById(req.params.id);
     if (!kalaam) return res.status(404).json({ message: 'Not found' });
-    if (kalaam.author.toString() !== req.user.id) {
+    if (!(await canManage(kalaam, req.user.id))) {
       return res.status(403).json({ message: 'Forbidden' });
     }
     const previousUrl = kalaam.referenceAudio && kalaam.referenceAudio.url;

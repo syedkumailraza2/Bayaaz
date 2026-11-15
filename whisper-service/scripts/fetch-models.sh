@@ -12,7 +12,8 @@ VOSK_MODEL_URL="${VOSK_MODEL_URL:-https://alphacephei.com/vosk/models/${VOSK_MOD
 
 if [ ! -d "${VOSK_MODEL_NAME}" ]; then
   echo "→ fetching Vosk model ${VOSK_MODEL_NAME}"
-  curl -fsSL -o vosk-model.zip "${VOSK_MODEL_URL}"
+  # alphacephei.com drops connections on large downloads — retry and resume.
+  curl -fsSL --retry 8 --retry-all-errors --retry-delay 3 -C - -o vosk-model.zip "${VOSK_MODEL_URL}"
   unzip -q vosk-model.zip
   rm vosk-model.zip
 else
