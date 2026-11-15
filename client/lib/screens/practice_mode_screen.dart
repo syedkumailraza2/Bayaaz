@@ -197,7 +197,7 @@ class _PracticeModeScreenState extends State<PracticeModeScreen>
 
     _restoreProgress();
     _loadReferenceAudio();
-    if (_mode == 'follow') _initVoice();
+    if (_mode == 'follow' && kVoiceFollowEnabled) _initVoice();
 
     // Animate the sheet in from a slightly smaller resting size to its
     // initial `0.62` height. The DraggableScrollableSheet itself starts at
@@ -1481,7 +1481,9 @@ class _FollowVoiceAppBar extends StatelessWidget {
                 ),
               ),
             ),
-          IconButton(
+          // Mic hidden while voice-follow is paused (kVoiceFollowEnabled).
+          if (kVoiceFollowEnabled)
+            IconButton(
             tooltip: voiceMode
                 ? 'Stop voice follow'
                 : voiceAvailable

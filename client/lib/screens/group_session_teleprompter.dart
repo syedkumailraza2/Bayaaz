@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import '../config/app_config.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:record/record.dart';
@@ -116,7 +117,8 @@ class _GroupSessionTeleprompterState extends State<GroupSessionTeleprompter> {
   }
 
   Future<void> _initVoiceIfHost() async {
-    if (_voiceInitAttempted) return;
+    // Voice-follow paused: _voiceAvailable stays false, so the mic is hidden.
+    if (!kVoiceFollowEnabled || _voiceInitAttempted) return;
     final auth = context.read<AuthProvider>();
     final session = context.read<SessionProvider>().session;
     final isHost = session?.hostId == auth.user?.id;

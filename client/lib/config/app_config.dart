@@ -15,6 +15,12 @@ const String kAppVersionLabel = '1.0.0-beta.2';
 /// flipping this to `true` brings the whole feature back.
 const bool kAiPracticeEnabled = false;
 
+/// Voice-follow (lines advance as you recite) in majlis sessions and in
+/// practice Follow mode. Needs the STT server (backend STT_URL). Hidden until
+/// that server is set up: the code stays in place, and flipping this to
+/// `true` brings back the mic buttons. Manual line tapping/sync is unaffected.
+const bool kVoiceFollowEnabled = false;
+
 /// Holds the server base URL.
 ///
 /// Resolution order (first match wins):

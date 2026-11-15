@@ -100,7 +100,9 @@ class _PracticeLauncherSheet extends StatelessWidget {
             _ModeCard(
               icon: Icons.auto_stories,
               title: 'Follow',
-              subtitle: 'Auto-advance line by line',
+              subtitle: kVoiceFollowEnabled
+                  ? 'Auto-advance line by line'
+                  : 'Read along line by line',
               mode: 'follow',
               showResume: hasResume && (progress!.mode == 'follow'),
               onTap: () {
