@@ -75,7 +75,7 @@ Each subproject has its own README with deeper detail.
 | Website + admin panel (`landing/`) | Vercel | `https://www.mybayaaz.com` |
 | Media | Cloudflare R2 | `R2_*` env vars on the API |
 
-The app talks to `https://api.mybayaaz.com` (see `client/lib/config/app_config.dart`), so the API can move to a new Render service or host by repointing the `api` DNS record — no app release needed.
+The app talks to `https://api.mybayaaz.com` (see `client/lib/config/app_config.dart`), so the API can move to a new Render service or host by repointing the `api` DNS record — no app release needed. DNS for mybayaaz.com is managed at **Hostinger** (hPanel → Domains → DNS records): `api` CNAME → `bayaaz-r9oe.onrender.com`; `www`/apex → Vercel.
 
 **Website env vars (Vercel):** `NEXT_PUBLIC_SITE_URL=https://www.mybayaaz.com`, optional `NEXT_PUBLIC_API_URL` (defaults to `https://api.mybayaaz.com/api`), `NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION` (Search Console token).
 

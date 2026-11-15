@@ -1,5 +1,5 @@
 # Caddy gets and renews the TLS certificate for STT_DOMAIN automatically
-# (the DNS record must point straight at this VM — Cloudflare "DNS only").
+# (the DNS record must point straight at this VM, with no proxy in front).
 # WebSocket upgrades on /ws are proxied transparently.
 {$STT_DOMAIN} {
 	reverse_proxy stt:5001
