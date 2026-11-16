@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import PageShell from "@/components/PageShell";
-import KalaamList from "@/components/KalaamList";
 import PeopleDirectory from "@/components/PeopleDirectory";
 import Breadcrumbs from "@/components/Breadcrumbs";
 import {
@@ -45,11 +44,6 @@ export default async function CategoryPage({ params }: Props) {
     .filter((k) => k.category === category)
     .sort((a, b) => a.title.localeCompare(b.title));
   const people = peopleInCategory(index, category);
-  // Kalaams with nobody attached would be unreachable from the people
-  // lists, so they get their own list below.
-  const unattributed = items.filter(
-    (k) => !k.reciters?.length && !k.shayars?.length,
-  );
   const unit: [string, string] = [info.label.toLowerCase(), info.plural.toLowerCase()];
 
   return (
@@ -85,18 +79,13 @@ export default async function CategoryPage({ params }: Props) {
         </>
       ) : null}
 
-      {unattributed.length > 0 ? (
-        <section className={people.length > 0 ? "mt-14" : ""}>
-          {people.length > 0 ? (
-            <h2 className="text-xl font-bold text-primary mb-4">
-              More {info.plural.toLowerCase()}
-            </h2>
-          ) : null}
-          <KalaamList items={unattributed} />
-        </section>
+      {people.length === 0 ? (
+        <p className="text-on-surface-variant">
+          {items.length === 0
+            ? `No ${info.plural.toLowerCase()} here yet — check back soon.`
+            : `${info.reciters} and shayars for these ${info.plural.toLowerCase()} are being added — check back soon.`}
+        </p>
       ) : null}
-
-      {items.length === 0 ? <KalaamList items={[]} /> : null}
     </PageShell>
   );
 }

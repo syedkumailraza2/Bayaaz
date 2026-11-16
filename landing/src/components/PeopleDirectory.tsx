@@ -42,22 +42,24 @@ export default function PeopleDirectory({
         </label>
       ) : null}
 
-      <ul className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <ul className="divide-y divide-outline-variant/40 border-y border-outline-variant/40">
         {people.map((p) => (
           <li key={p.slug} hidden={!matches(p)}>
             <Link
               href={`/${category}/${p.slug}`}
-              className="flex items-center justify-between gap-4 p-4 rounded-2xl hairline hover:bg-surface-container-low transition-colors"
+              className="group flex items-center justify-between gap-4 py-3.5 px-2 -mx-2 rounded hover:bg-surface-container-low transition-colors"
             >
               <span className="flex items-center gap-3 min-w-0">
                 <span
                   aria-hidden
-                  className="w-11 h-11 shrink-0 rounded-full bg-[#E8F3EE] text-[#054A29] flex items-center justify-center font-bold"
+                  className="w-10 h-10 shrink-0 rounded-full bg-[#E8F3EE] text-[#054A29] flex items-center justify-center font-bold"
                 >
                   {p.name.trim().charAt(0).toUpperCase()}
                 </span>
                 <span className="min-w-0">
-                  <span className="block font-semibold text-on-surface truncate">{p.name}</span>
+                  <span className="block font-semibold text-on-surface truncate group-hover:text-primary">
+                    {p.name}
+                  </span>
                   <span className="block text-xs text-outline">
                     {[p.isReciter ? reciterLabel : null, p.isShayar ? "Shayar" : null]
                       .filter(Boolean)
@@ -66,7 +68,10 @@ export default function PeopleDirectory({
                 </span>
               </span>
               <span className="shrink-0 text-sm text-outline">
-                {p.count} {p.count === 1 ? unit[0] : unit[1]} →
+                {p.count} {p.count === 1 ? unit[0] : unit[1]}
+                <span aria-hidden className="ml-2 inline-block transition-transform group-hover:translate-x-0.5">
+                  →
+                </span>
               </span>
             </Link>
           </li>
