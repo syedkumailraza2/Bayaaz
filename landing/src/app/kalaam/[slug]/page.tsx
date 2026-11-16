@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound, permanentRedirect } from "next/navigation";
 import PageShell from "@/components/PageShell";
 import ReferencePlayer from "@/components/ReferencePlayer";
+import Breadcrumbs from "@/components/Breadcrumbs";
 import {
   CATEGORY_INFO,
   getKalaam,
@@ -102,6 +103,9 @@ export default async function KalaamPage({ params }: Props) {
   const allText = k.content.flatMap((s) => s.lines).join(" ");
   const arabic = isArabicScript(allText);
   const path = kalaamPath(k);
+  // Breadcrumb goes through the first reciter (or shayar) so visitors can
+  // step back to that person's list.
+  const crumbPerson = k.reciters?.[0] ?? k.shayars?.[0] ?? null;
 
   const jsonLd = {
     "@context": "https://schema.org",
@@ -162,27 +166,25 @@ export default async function KalaamPage({ params }: Props) {
             breadcrumbJsonLd([
               { name: "Home", path: "/" },
               { name: `${info?.label ?? "Kalaam"} lyrics`, path: `/${k.category}` },
+              ...(crumbPerson
+                ? [{ name: crumbPerson.name, path: `/${k.category}/${crumbPerson.slug}` }]
+                : []),
               { name: k.title, path },
             ]),
           ),
         }}
       />
 
-      <nav aria-label="Breadcrumb" className="mb-8 text-sm text-outline">
-        <Link href="/" className="hover:text-primary">Home</Link>
-        <span aria-hidden> / </span>
-        <Link href={`/${k.category}`} className="hover:text-primary">
-          {info?.plural ?? "Kalaams"}
-        </Link>
-        {k.reciters?.[0] ? (
-          <>
-            <span aria-hidden> / </span>
-            <Link href={`/${k.category}/${k.reciters[0].slug}`} className="hover:text-primary">
-              {k.reciters[0].name}
-            </Link>
-          </>
-        ) : null}
-      </nav>
+      <Breadcrumbs
+        items={[
+          { name: "Home", href: "/" },
+          { name: info?.label ?? "Kalaams", href: `/${k.category}` },
+          ...(crumbPerson
+            ? [{ name: crumbPerson.name, href: `/${k.category}/${crumbPerson.slug}` }]
+            : []),
+          { name: k.title },
+        ]}
+      />
 
       {k.referenceAudio?.url ? (
         <ReferencePlayer media={k.referenceAudio} title={k.title} />

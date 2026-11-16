@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import PageShell from "@/components/PageShell";
-import KalaamList from "@/components/KalaamList";
-import PeopleTabs from "@/components/PeopleTabs";
+import PeopleDirectory from "@/components/PeopleDirectory";
+import Breadcrumbs from "@/components/Breadcrumbs";
 import {
   CATEGORIES,
   CATEGORY_INFO,
@@ -43,12 +43,7 @@ export default async function CategoryPage({ params }: Props) {
   const items = index
     .filter((k) => k.category === category)
     .sort((a, b) => a.title.localeCompare(b.title));
-  const { reciters, shayars } = peopleInCategory(index, category);
-  // Kalaams with nobody attached would be unreachable from the people
-  // lists, so they get their own list below.
-  const unattributed = items.filter(
-    (k) => !k.reciters?.length && !k.shayars?.length,
-  );
+  const people = peopleInCategory(index, category);
   const unit: [string, string] = [info.label.toLowerCase(), info.plural.toLowerCase()];
 
   return (
@@ -65,29 +60,32 @@ export default async function CategoryPage({ params }: Props) {
         }}
       />
 
-      {reciters.length + shayars.length > 0 ? (
-        <PeopleTabs
-          category={category}
-          unit={unit}
-          tabs={[
-            { key: "reciters", label: info.reciters, people: reciters },
-            { key: "shayars", label: "Shayars", people: shayars },
-          ]}
-        />
+      <Breadcrumbs items={[{ name: "Home", href: "/" }, { name: info.label }]} />
+
+      {people.length > 0 ? (
+        <>
+          <h2 className="text-xl font-bold text-primary mb-1">
+            {`${info.reciters} & Shayars`}
+          </h2>
+          <p className="text-sm text-outline mb-5">
+            Choose a {info.reciter.toLowerCase()} or shayar to see their {info.plural.toLowerCase()}.
+          </p>
+          <PeopleDirectory
+            category={category}
+            people={people}
+            reciterLabel={info.reciter}
+            unit={unit}
+          />
+        </>
       ) : null}
 
-      {unattributed.length > 0 ? (
-        <section className={reciters.length + shayars.length > 0 ? "mt-14" : ""}>
-          {reciters.length + shayars.length > 0 ? (
-            <h2 className="text-xl font-bold text-primary mb-4">
-              More {info.plural.toLowerCase()}
-            </h2>
-          ) : null}
-          <KalaamList items={unattributed} />
-        </section>
+      {people.length === 0 ? (
+        <p className="text-on-surface-variant">
+          {items.length === 0
+            ? `No ${info.plural.toLowerCase()} here yet — check back soon.`
+            : `${info.reciters} and shayars for these ${info.plural.toLowerCase()} are being added — check back soon.`}
+        </p>
       ) : null}
-
-      {items.length === 0 ? <KalaamList items={[]} /> : null}
     </PageShell>
   );
 }
