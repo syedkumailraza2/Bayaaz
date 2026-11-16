@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import PageShell from "@/components/PageShell";
 import KalaamList from "@/components/KalaamList";
+import Breadcrumbs from "@/components/Breadcrumbs";
 import {
   CATEGORIES,
   CATEGORY_INFO,
@@ -20,9 +20,7 @@ type Props = { params: Promise<{ category: string; person: string }> };
 export async function generateStaticParams() {
   const index = await getKalaamIndex();
   return CATEGORIES.flatMap((category) => {
-    const { reciters, shayars } = peopleInCategory(index, category);
-    const slugs = new Set([...reciters, ...shayars].map((p) => p.slug));
-    return [...slugs].map((person) => ({ category, person }));
+    return peopleInCategory(index, category).map((p) => ({ category, person: p.slug }));
   });
 }
 
@@ -104,13 +102,13 @@ export default async function PersonPage({ params }: Props) {
         }}
       />
 
-      <nav aria-label="Breadcrumb" className="mb-8 text-sm text-outline">
-        <Link href={`/${category}`} className="hover:text-primary">
-          {info.label}
-        </Link>
-        <span aria-hidden> › </span>
-        <span className="text-on-surface-variant">{name}</span>
-      </nav>
+      <Breadcrumbs
+        items={[
+          { name: "Home", href: "/" },
+          { name: info.label, href: `/${category}` },
+          { name },
+        ]}
+      />
 
       <KalaamList items={items} />
     </PageShell>

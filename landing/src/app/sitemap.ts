@@ -31,9 +31,7 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   }));
 
   const personEntries: MetadataRoute.Sitemap = CATEGORIES.flatMap((c) => {
-    const { reciters, shayars } = peopleInCategory(kalaams, c);
-    const slugs = new Set([...reciters, ...shayars].map((p) => p.slug));
-    return [...slugs].map((slug) => ({
+    return peopleInCategory(kalaams, c).map(({ slug }) => ({
       url: `${siteUrl}/${c}/${slug}`,
       lastModified: now,
       changeFrequency: "weekly" as const,

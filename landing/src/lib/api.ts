@@ -196,28 +196,42 @@ export function youtubeId(raw: string | null | undefined): string | null {
 
 // ─── People (shayars / reciters) ───────────────────────────────────────────
 
-export type PersonSummary = PersonLink & { count: number };
+export type PersonSummary = PersonLink & {
+  /** Kalaams in the category this person recited and/or wrote (each once). */
+  count: number;
+  isReciter: boolean;
+  isShayar: boolean;
+};
 
-/** People appearing in a category, each with how many of its kalaams. */
+/**
+ * Everyone appearing in a category — reciters and shayars in one list,
+ * each person once (with their roles), most kalaams first.
+ */
 export function peopleInCategory(
   index: KalaamIndexItem[],
   category: Category,
-): { reciters: PersonSummary[]; shayars: PersonSummary[] } {
-  const tally = (pick: (k: KalaamIndexItem) => PersonLink[] | undefined) => {
-    const map = new Map<string, PersonSummary>();
-    for (const k of index) {
-      if (k.category !== category) continue;
-      for (const p of pick(k) ?? []) {
-        const e = map.get(p.slug) ?? { ...p, count: 0 };
+): PersonSummary[] {
+  const map = new Map<string, PersonSummary>();
+  for (const k of index) {
+    if (k.category !== category) continue;
+    const seenHere = new Set<string>();
+    const add = (p: PersonLink, role: "isReciter" | "isShayar") => {
+      const e =
+        map.get(p.slug) ??
+        { ...p, count: 0, isReciter: false, isShayar: false };
+      e[role] = true;
+      if (!seenHere.has(p.slug)) {
         e.count += 1;
-        map.set(p.slug, e);
+        seenHere.add(p.slug);
       }
-    }
-    return [...map.values()].sort(
-      (a, b) => b.count - a.count || a.name.localeCompare(b.name),
-    );
-  };
-  return { reciters: tally((k) => k.reciters), shayars: tally((k) => k.shayars) };
+      map.set(p.slug, e);
+    };
+    for (const p of k.reciters ?? []) add(p, "isReciter");
+    for (const p of k.shayars ?? []) add(p, "isShayar");
+  }
+  return [...map.values()].sort(
+    (x, y) => y.count - x.count || x.name.localeCompare(y.name),
+  );
 }
 
 /** A person's kalaams within a category, and which roles they hold there. */
