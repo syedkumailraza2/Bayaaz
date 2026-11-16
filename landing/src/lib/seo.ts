@@ -8,13 +8,13 @@ export const siteUrl = (
 
 export const siteName = "BAYAAZ";
 
-export const siteTagline = "The poetry bayaaz you remember.";
+export const siteTagline = "Beyond the kalaams everyone remembers.";
 
 export const siteDescription =
-  "Precision-engineered for the literary mind. Organize, recite, and sync your kalaams with a distraction-free tool built for serious zakireen and poets.";
+  "Hand-picked nauha, marsiya, qasida and qata lyrics from underrated poets, anjumans and old bayaazes — read, recite and share them in your majlis.";
 
 export const siteShortDescription =
-  "Organize, recite, and sync your kalaams with a distraction-free tool built for serious zakireen and poets.";
+  "Kalaams from underrated poets, anjumans and old bayaazes — not just the popular few.";
 
 export const siteKeywords = [
   "BAYAAZ",

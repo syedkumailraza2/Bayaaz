@@ -19,9 +19,10 @@ speakers (measured: 40 streams = 3 cores, 1.9 GB, <0.5 s lag).
    resources stay free, and Oracle stops reclaiming "idle" free VMs.
    Set a budget alert at $1 as a safety net.
 
-## 2. DNS (Cloudflare)
-Add an **A record** `stt` → the VM's public IP with **Proxy status: DNS only**
-(grey cloud), so Caddy can issue the HTTPS certificate.
+## 2. DNS (Hostinger)
+hPanel → Domains → mybayaaz.com → DNS / Nameservers → DNS records → add an
+**A record**: name `stt`, pointing to the VM's public IP. Caddy issues the HTTPS
+certificate once the record resolves.
 
 ## 3. Prepare the VM (one time)
 ```bash

@@ -1,6 +1,6 @@
 import { ImageResponse } from "next/og";
 
-export const alt = "BAYAAZ — The poetry bayaaz you remember.";
+export const alt = "BAYAAZ — Beyond the kalaams everyone remembers.";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -21,7 +21,7 @@ export default async function Image() {
       >
         <div style={{ fontSize: 120, fontWeight: 800, letterSpacing: -4 }}>BAYAAZ</div>
         <div style={{ fontSize: 44, marginTop: 16, color: "#b1f1c3" }}>
-          The poetry bayaaz you remember.
+          Beyond the kalaams everyone remembers.
         </div>
         <div style={{ fontSize: 30, marginTop: 40, color: "#96d5a8" }}>
           Nauha · Marsiya · Qasida · Qata lyrics — read, recite, and sync your majlis.
