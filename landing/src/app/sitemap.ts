@@ -1,6 +1,6 @@
 import type { MetadataRoute } from "next";
 import { siteUrl } from "@/lib/seo";
-import { CATEGORIES, getKalaamIndex, kalaamPath } from "@/lib/api";
+import { CATEGORIES, getKalaamIndex, kalaamPath, peopleInCategory } from "@/lib/api";
 
 export const revalidate = 3600;
 
@@ -30,5 +30,16 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     priority: 0.7,
   }));
 
-  return [...staticEntries, ...kalaamEntries];
+  const personEntries: MetadataRoute.Sitemap = CATEGORIES.flatMap((c) => {
+    const { reciters, shayars } = peopleInCategory(kalaams, c);
+    const slugs = new Set([...reciters, ...shayars].map((p) => p.slug));
+    return [...slugs].map((slug) => ({
+      url: `${siteUrl}/${c}/${slug}`,
+      lastModified: now,
+      changeFrequency: "weekly" as const,
+      priority: 0.75,
+    }));
+  });
+
+  return [...staticEntries, ...personEntries, ...kalaamEntries];
 }

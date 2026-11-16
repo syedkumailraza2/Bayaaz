@@ -2,6 +2,7 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const Kalaam = require('../model/Kalaam');
 const User = require('../model/User');
+const Person = require('../model/Person');
 const auth = require('../middleware/auth');
 const requireAdmin = require('../middleware/requireAdmin');
 const { isAdmin } = require('../middleware/requireAdmin');
@@ -134,7 +135,7 @@ router.get('/', async (req, res) => {
 router.get('/index', async (req, res) => {
   try {
     const items = await Kalaam.find({ isPublic: true })
-      .select('title category poet updatedAt')
+      .select('title category poet shayars reciters updatedAt')
       .sort({ updatedAt: -1 })
       .lean();
     res.set('Cache-Control', 'public, max-age=300');
@@ -143,12 +144,37 @@ router.get('/index', async (req, res) => {
       title: k.title,
       category: k.category,
       poet: k.poet || null,
+      shayars: personLinks(k.shayars),
+      reciters: personLinks(k.reciters),
       updatedAt: k.updatedAt,
     })));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
+
+// Apply shayars / reciters from a create/update body.
+//   shayars, reciters — arrays of names (or a comma-separated string)
+//   poet              — legacy string from older app builds; used for
+//                       shayars when `shayars` isn't sent
+// Only admins may add new people to the People table; for everyone else
+// unknown names are dropped from the lists (but kept in the legacy `poet`).
+async function applyPeople(kalaam, body, userId) {
+  const create = await isAdmin(userId);
+  const has = (k) => Object.prototype.hasOwnProperty.call(body, k);
+  if (has('shayars')) {
+    kalaam.shayars = await Person.refsFromNames(body.shayars, { create });
+    kalaam.poet = kalaam.shayars.map((p) => p.name).join(', ') || undefined;
+  } else if (has('poet')) {
+    kalaam.poet = body.poet;
+    kalaam.shayars = await Person.refsFromNames(body.poet, { create });
+  }
+  if (has('reciters')) {
+    kalaam.reciters = await Person.refsFromNames(body.reciters, { create });
+  }
+}
+
+const personLinks = (refs) => (refs || []).map((p) => ({ name: p.name, slug: p.slug }));
 
 // GET /api/kalaams/stats — public counters for the website's KPI strip.
 // Cheap counts only; cached 5 min at the edge.
@@ -380,16 +406,17 @@ router.get('/:id', async (req, res) => {
 // POST /api/kalaams — create (admins only)
 router.post('/', auth, requireAdmin, async (req, res) => {
   try {
-    const { title, content, category, isPublic, poet, tags } = req.body;
-    const kalaam = await Kalaam.create({
+    const { title, content, category, isPublic, tags } = req.body;
+    const kalaam = new Kalaam({
       title,
       content,
       category,
       isPublic: isPublic !== undefined ? isPublic : true,
-      poet,
       tags: Array.isArray(tags) ? tags : [],
       author: req.user.id,
     });
+    await applyPeople(kalaam, req.body, req.user.id);
+    await kalaam.save();
     await kalaam.populate('author', 'name avatar');
     // A freshly created kalaam can't be in anyone's saved list yet, so an
     // empty savedSet is correct (and skips the User lookup).
@@ -406,8 +433,9 @@ router.put('/:id', auth, async (req, res) => {
     if (!kalaam) return res.status(404).json({ message: 'Not found' });
     if (!(await canManage(kalaam, req.user.id))) return res.status(403).json({ message: 'Forbidden' });
 
-    const { title, content, category, isPublic, poet, tags } = req.body;
-    Object.assign(kalaam, { title, content, category, isPublic, poet, tags: Array.isArray(tags) ? tags : kalaam.tags });
+    const { title, content, category, isPublic, tags } = req.body;
+    Object.assign(kalaam, { title, content, category, isPublic, tags: Array.isArray(tags) ? tags : kalaam.tags });
+    await applyPeople(kalaam, req.body, req.user.id);
     await kalaam.save();
     await kalaam.populate('author', 'name avatar');
     const savedSet = await loadSavedSet(req.user.id);

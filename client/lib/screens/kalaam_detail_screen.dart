@@ -68,6 +68,18 @@ class _KalaamDetailScreenState extends State<KalaamDetailScreen>
         // Fire-and-forget read counter bump. The provider reconciles the
         // in-memory lists optimistically so the count animates up immediately.
         provider.recordView(id);
+        // Pull the latest copy: lists filled from the offline cache lack the
+        // reciters/shayars and the reference audio/video.
+        provider.refreshKalaam(id).then((fresh) {
+          if (fresh != null && mounted) {
+            setState(() => _kalaam = fresh.copyWith(
+                  likedByMe: _kalaam?.likedByMe,
+                  likesCount: _kalaam?.likesCount,
+                  savedByMe: _kalaam?.savedByMe,
+                  savesCount: _kalaam?.savesCount,
+                ));
+          }
+        });
       });
     }
   }
@@ -90,8 +102,12 @@ class _KalaamDetailScreenState extends State<KalaamDetailScreen>
   // touch after deactivate).
   KalaamProvider? _providerRef;
 
+  // Freshest copy seen in build (provider lists first, then the route arg),
+  // so the reading screen gets the reference media that refreshKalaam found.
+  KalaamModel? _latest;
+
   void _openPractice({required String mode}) {
-    final kalaam = _kalaam;
+    final kalaam = _latest ?? _kalaam;
     if (kalaam == null) return;
     Navigator.pushNamed(
       context,
@@ -143,6 +159,7 @@ class _KalaamDetailScreenState extends State<KalaamDetailScreen>
 
     // Stash for dispose-time room cleanup (BuildContext is unsafe there).
     _providerRef ??= context.read<KalaamProvider>();
+    _latest = liveKalaam;
 
     final cat = _CategoryGlyph.from(liveKalaam.category);
     final size = MediaQuery.of(context).size;
@@ -357,6 +374,49 @@ class _TitleBlock extends StatelessWidget {
 
   const _TitleBlock({required this.kalaam, required this.isDark});
 
+  static const _reciterLabels = {
+    'nauha': 'Nauha khwan',
+    'marsiya': 'Marsiya khwan',
+    'qasida': 'Qasida khwan',
+  };
+
+  /// "Nauha khwan: A and B" / "Shayar: C" under the title.
+  List<Widget> _peopleLines() {
+    final shayar = kalaam.shayars.isNotEmpty
+        ? joinPersonNames(kalaam.shayars)
+        : (kalaam.poet ?? '').trim();
+    final rows = <(String, String)>[
+      if (kalaam.reciters.isNotEmpty)
+        (_reciterLabels[kalaam.category] ?? 'Reciter', joinPersonNames(kalaam.reciters)),
+      if (shayar.isNotEmpty) ('Shayar', shayar),
+    ];
+    if (rows.isEmpty) return const [];
+    return [
+      const SizedBox(height: 10),
+      for (final (label, names) in rows)
+        Padding(
+          padding: const EdgeInsets.only(top: 2),
+          child: Text.rich(
+            TextSpan(children: [
+              TextSpan(
+                text: '$label: ',
+                style: TextStyle(color: isDark ? Colors.white54 : _kInkMuted),
+              ),
+              TextSpan(
+                text: names,
+                style: TextStyle(
+                  fontWeight: FontWeight.w600,
+                  color: isDark ? Colors.white : _kInkPrimary,
+                ),
+              ),
+            ]),
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 14, height: 1.3),
+          ),
+        ),
+    ];
+  }
+
   @override
   Widget build(BuildContext context) {
     final hasTag = kalaam.tags.isNotEmpty;
@@ -394,6 +454,7 @@ class _TitleBlock extends StatelessWidget {
             letterSpacing: -0.6,
           ),
         ),
+        ..._peopleLines(),
         const SizedBox(height: 12),
         Row(
           mainAxisAlignment: MainAxisAlignment.center,

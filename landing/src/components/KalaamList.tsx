@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { CATEGORY_INFO, kalaamPath, type KalaamIndexItem } from "@/lib/api";
+import { CATEGORY_INFO, joinNames, kalaamPath, type KalaamIndexItem } from "@/lib/api";
 
 export default function KalaamList({
   items,
@@ -27,7 +27,10 @@ export default function KalaamList({
               {k.title}
             </span>
             <span className="shrink-0 text-sm text-outline text-right">
-              {[k.poet, showCategory ? CATEGORY_INFO[k.category]?.label : null]
+              {[
+                joinNames(k.reciters) || joinNames(k.shayars) || k.poet,
+                showCategory ? CATEGORY_INFO[k.category]?.label : null,
+              ]
                 .filter(Boolean)
                 .join(" · ")}
             </span>
