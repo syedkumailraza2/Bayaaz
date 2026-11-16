@@ -150,6 +150,29 @@ router.get('/index', async (req, res) => {
   }
 });
 
+// GET /api/kalaams/stats — public counters for the website's KPI strip.
+// Cheap counts only; cached 5 min at the edge.
+router.get('/stats', async (req, res) => {
+  try {
+    const Session = require('../model/Session');
+    const [kalaams, poets, reciters, majalis] = await Promise.all([
+      Kalaam.countDocuments({ isPublic: true }),
+      Kalaam.distinct('poet', { isPublic: true }),
+      User.estimatedDocumentCount(),
+      Session.estimatedDocumentCount(),
+    ]);
+    res.set('Cache-Control', 'public, max-age=300');
+    res.json({
+      kalaams,
+      poets: poets.filter((p) => p && p.trim()).length,
+      reciters,
+      majalis,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // GET /api/kalaams/admin/all — admin-only list incl. private kalaams.
 // Same query params as the public feed (q, tag, category, page, limit).
 router.get('/admin/all', auth, requireAdmin, async (req, res) => {

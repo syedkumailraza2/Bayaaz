@@ -4,15 +4,32 @@ import Nav from "@/components/Nav";
 import Footer from "@/components/Footer";
 import Splash from "@/components/Splash";
 import { softwareApplicationJsonLd } from "@/lib/seo";
+import { formatCount, getSiteStats } from "@/lib/api";
 
 export const metadata: Metadata = {
   title: {
-    absolute: "BAYAAZ — The poetry bayaaz you remember.",
+    absolute:
+      "BAYAAZ — Nauha, Marsiya & Qasida lyrics from underrated poets and anjumans",
   },
   alternates: { canonical: "/" },
 };
 
-export default function Home() {
+// Live KPIs: rebuilt hourly, and immediately when an admin saves a kalaam.
+export const revalidate = 3600; // = REVALIDATE_SECONDS (must be a literal)
+
+const MARQUEE = ["UNDERRATED POETS", "بیاض", "ANJUMAN KALAAMS", "PURANE KALAAM", "MAJLIS SYNC"];
+
+export default async function Home() {
+  const stats = await getSiteStats();
+  const kpis: [string, string][] = stats
+    ? ([
+        [formatCount(stats.kalaams), "KALAAMS"],
+        [formatCount(stats.poets), "POETS"],
+        stats.reciters != null ? [formatCount(stats.reciters), "RECITERS"] : null,
+        stats.majalis != null ? [formatCount(stats.majalis), "MAJALIS HELD"] : null,
+      ].filter(Boolean) as [string, string][])
+    : [];
+
   return (
     <>
       <script
@@ -36,17 +53,18 @@ export default function Home() {
               </span>
             </div>
             <h1 className="text-[44px] sm:text-[56px] md:text-[72px] lg:text-[84px] leading-[0.95] tracking-tight text-primary font-extrabold">
-              The bayaaz <br />
-              for poetry you{" "}
+              Beyond the kalaams <br />
+              everyone{" "}
               <i className="text-secondary-fixed-dim italic font-extrabold">
-                remember
+                remembers
               </i>
               .
             </h1>
-            <p className="max-w-[540px] text-base md:text-lg leading-relaxed text-on-surface-variant">
-              Precision-engineered for the literary mind. Organize, recite, and
-              sync your kalaams with a distraction-free tool built for serious
-              zakireen and poets.
+            <p className="max-w-[560px] text-base md:text-lg leading-relaxed text-on-surface-variant">
+              Most platforms only carry the same few popular kalaams. Bayaaz
+              brings together hand-picked nauhas, marsiyas and qasidas from
+              underrated poets, anjumans and old bayaazes — ready to read,
+              recite and share in your majlis.
             </p>
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4 mt-1">
               <a
@@ -68,11 +86,15 @@ export default function Home() {
             <div className="flex flex-wrap gap-4 md:gap-6 mt-3 font-mono text-[11px] text-outline uppercase tracking-[0.15em]">
               <span>Free</span>
               <span className="text-primary-fixed-dim">·</span>
-              <span>★ 4.9/5</span>
-              <span className="text-primary-fixed-dim">·</span>
               <span>Offline-First</span>
-              <span className="text-primary-fixed-dim">·</span>
-              <span>1,240 Kalaams</span>
+              {stats && (
+                <>
+                  <span className="text-primary-fixed-dim">·</span>
+                  <span>{formatCount(stats.kalaams)} Kalaams</span>
+                  <span className="text-primary-fixed-dim">·</span>
+                  <span>{formatCount(stats.poets)} Poets</span>
+                </>
+              )}
             </div>
           </div>
 
@@ -98,65 +120,56 @@ export default function Home() {
 
       {/* Marquee */}
       <div className="hairline-t hairline-b h-14 flex items-center bg-white marquee-container">
-        <div className="marquee-content flex items-center gap-12 px-6">
-          {[0, 1].map((i) => (
-            <div key={i} className="inline-flex items-center gap-12">
-              <span className="font-mono text-xs tracking-widest text-on-surface-variant">
-                PRACTICE SCORING
-              </span>
-              <span className="w-2 h-2 rounded-full bg-secondary-fixed-dim" />
-              <span className="font-[family-name:var(--font-naskh)] text-xl text-primary font-bold">
-                بیاض
-              </span>
-              <span className="w-2 h-2 rounded-full bg-secondary-fixed-dim" />
-              <span className="font-mono text-xs tracking-widest text-on-surface-variant">
-                QATA
-              </span>
-              <span className="w-2 h-2 rounded-full bg-secondary-fixed-dim" />
-              <span className="font-mono text-xs tracking-widest text-on-surface-variant">
-                MAJLIS SYNC
-              </span>
-              <span className="w-2 h-2 rounded-full bg-secondary-fixed-dim" />
-            </div>
-          ))}
-        </div>
-        <div className="marquee-content flex items-center gap-12 px-6">
-          {[0, 1].map((i) => (
-            <div key={i} className="inline-flex items-center gap-12">
-              <span className="font-mono text-xs tracking-widest text-on-surface-variant">
-                PRACTICE SCORING
-              </span>
-              <span className="w-2 h-2 rounded-full bg-secondary-fixed-dim" />
-              <span className="font-[family-name:var(--font-naskh)] text-xl text-primary font-bold">
-                بیاض
-              </span>
-              <span className="w-2 h-2 rounded-full bg-secondary-fixed-dim" />
-              <span className="font-mono text-xs tracking-widest text-on-surface-variant">
-                QATA
-              </span>
-              <span className="w-2 h-2 rounded-full bg-secondary-fixed-dim" />
-              <span className="font-mono text-xs tracking-widest text-on-surface-variant">
-                MAJLIS SYNC
-              </span>
-              <span className="w-2 h-2 rounded-full bg-secondary-fixed-dim" />
-            </div>
-          ))}
-        </div>
+        {[0, 1].map((copy) => (
+          <div
+            key={copy}
+            className="marquee-content flex items-center gap-12 px-6"
+            aria-hidden={copy === 1}
+          >
+            {[0, 1].map((i) => (
+              <div key={i} className="inline-flex items-center gap-12">
+                {MARQUEE.map((label) =>
+                  label === "بیاض" ? (
+                    <span
+                      key={label}
+                      className="font-[family-name:var(--font-naskh)] text-xl text-primary font-bold"
+                    >
+                      {label}
+                    </span>
+                  ) : (
+                    <span
+                      key={label}
+                      className="font-mono text-xs tracking-widest text-on-surface-variant"
+                    >
+                      {label}
+                    </span>
+                  ),
+                ).flatMap((el, j) => [
+                  el,
+                  <span
+                    key={`dot-${j}`}
+                    className="w-2 h-2 rounded-full bg-secondary-fixed-dim"
+                  />,
+                ])}
+              </div>
+            ))}
+          </div>
+        ))}
       </div>
 
-      {/* Stats */}
+      {/* Stats — live counts from the API; hidden if it's unreachable */}
+      {kpis.length > 0 && (
       <section className="py-24 md:py-[120px] bg-white">
         <div className="container mx-auto max-w-[1080px] px-6 md:px-0">
           <h2 className="text-center text-[36px] md:text-[56px] text-primary mb-12 md:mb-20 tracking-tight font-bold">
-            The digital home for tradition.
+            A growing home for tradition.
           </h2>
-          <div className="grid grid-cols-2 md:grid-cols-4 hairline-t">
-            {[
-              ["1,240", "VERIFIED KALAAMS"],
-              ["12k+", "RECITERS WORLDWIDE"],
-              ["0", "LATENCY SYNC"],
-              ["∞", "STORAGE SPACE"],
-            ].map(([value, label], idx, arr) => (
+          <div
+            className={`grid grid-cols-2 hairline-t ${
+              kpis.length === 4 ? "md:grid-cols-4" : "md:grid-cols-2"
+            }`}
+          >
+            {kpis.map(([value, label], idx, arr) => (
               <div
                 key={label}
                 className={`p-8 md:p-12 flex flex-col items-center ${
@@ -174,122 +187,7 @@ export default function Home() {
           </div>
         </div>
       </section>
-
-      {/* Bento */}
-      <section className="py-16 md:py-20">
-        <div className="container mx-auto max-w-[1080px] px-6 md:px-0">
-          <div className="grid grid-cols-1 md:grid-cols-4 md:grid-rows-3 gap-4 h-auto md:h-[800px]">
-            {/* A */}
-            <div className="md:col-span-2 md:row-span-2 bento-card hairline rounded-2xl p-8 flex flex-col justify-between group overflow-hidden">
-              <div>
-                <h3 className="text-3xl mb-2 text-primary font-bold tracking-tight">
-                  Follow my voice
-                </h3>
-                <p className="text-on-surface-variant max-w-[280px]">
-                  Real-time waveform tracking keeps you on beat during
-                  recitations.
-                </p>
-              </div>
-              <div className="mt-8 bg-surface-container rounded-xl p-4 hairline group-hover:scale-105 transition-transform duration-500">
-                <div className="flex items-center gap-4 mb-4">
-                  <span className="text-secondary text-xl">≡</span>
-                  <div className="flex-1 h-1 bg-outline-variant rounded-full overflow-hidden">
-                    <div className="h-full bg-secondary w-2/3" />
-                  </div>
-                </div>
-                <div className="font-[family-name:var(--font-naskh)] text-xl text-center opacity-80">
-                  سر جھکا کر جو کھڑے ہیں
-                </div>
-              </div>
-            </div>
-
-            {/* B */}
-            <div className="md:col-span-1 md:row-span-2 bg-[#054A29] rounded-2xl p-8 flex flex-col justify-between text-white overflow-hidden relative">
-              <div className="relative z-10">
-                <h3 className="text-2xl mb-4 font-bold tracking-tight">
-                  Everyone on the same line.
-                </h3>
-                <p className="text-on-primary-container text-sm opacity-80">
-                  Synchronize tablets and phones for seamless group sessions.
-                </p>
-              </div>
-              <div className="mt-12 flex flex-col gap-2 relative z-10">
-                {[0, 1, 2].map((i) => (
-                  <div
-                    key={i}
-                    className="w-full h-8 bg-white/10 rounded-lg flex items-center px-4 gap-2"
-                  >
-                    <div className="w-2 h-2 rounded-full bg-secondary-fixed-dim" />
-                    <div className="flex-1 h-1 bg-white/20 rounded-full" />
-                  </div>
-                ))}
-              </div>
-              <div className="absolute -bottom-12 -right-12 w-48 h-48 bg-secondary-fixed-dim/20 blur-3xl" />
-            </div>
-
-            {/* C */}
-            <div className="md:col-span-1 md:row-span-1 bento-card hairline rounded-2xl p-8 flex flex-col items-center justify-center text-center group">
-              <div className="w-16 h-16 rounded-full bg-surface-container flex items-center justify-center mb-4 group-hover:bg-primary transition-colors text-primary group-hover:text-white text-2xl">
-                ●
-              </div>
-              <h4 className="text-primary font-semibold">Practice scoring</h4>
-            </div>
-
-            {/* D */}
-            <div className="md:col-span-1 md:row-span-1 bento-card hairline rounded-2xl p-8 flex flex-col items-center justify-center text-center group">
-              <div className="w-16 h-16 rounded-full bg-surface-container flex items-center justify-center mb-4 group-hover:bg-primary transition-colors text-primary group-hover:text-white text-2xl">
-                ⌀
-              </div>
-              <h4 className="text-primary font-semibold">Works offline</h4>
-            </div>
-
-            {/* E */}
-            <div className="md:col-span-2 md:row-span-1 bg-surface-container-low rounded-2xl p-8 flex flex-col justify-between">
-              <div>
-                <h3 className="text-2xl mb-2 text-primary font-bold tracking-tight">
-                  Bring your own reference.
-                </h3>
-                <p className="text-on-surface-variant text-sm">
-                  Attach audio or video files to any bayaaz entry.
-                </p>
-              </div>
-              <div className="flex flex-wrap gap-3 mt-4">
-                {["MP3 MASTER", "MP4 REFERENCE", "WAV HIGH-RES"].map((t) => (
-                  <span
-                    key={t}
-                    className="px-3 py-1 bg-white hairline rounded-full font-mono text-[10px] tracking-wider"
-                  >
-                    {t}
-                  </span>
-                ))}
-              </div>
-            </div>
-
-            {/* F */}
-            <div className="md:col-span-2 md:row-span-1 bento-card hairline rounded-2xl p-8 flex flex-col justify-between">
-              <div>
-                <h3 className="text-2xl mb-2 text-primary font-bold tracking-tight">
-                  Write in Urdu or Roman
-                </h3>
-                <p className="text-on-surface-variant text-sm">
-                  Instant transliteration for easy reading during recitations.
-                </p>
-              </div>
-              <div className="flex flex-wrap gap-2 mt-4">
-                <span className="px-4 py-1 bg-secondary text-on-secondary rounded-full font-mono text-[11px] tracking-wider">
-                  URDU (NASKH)
-                </span>
-                <span className="px-4 py-1 bg-surface-container hairline rounded-full font-mono text-[11px] tracking-wider">
-                  ROMAN URDU
-                </span>
-                <span className="px-4 py-1 bg-surface-container hairline rounded-full font-mono text-[11px] tracking-wider">
-                  PHONETIC
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
+      )}
 
       {/* Showcase */}
       <section
@@ -302,22 +200,23 @@ export default function Home() {
               {[
                 {
                   step: "Open.",
-                  body: "Your entire library, organized by poet, theme, or recent session. Instant access when the majlis starts.",
+                  body: "Browse hand-picked nauhas, marsiyas, qasidas and qatas — including poets and anjumans you won't find anywhere else. Saved offline, ready when the majlis starts.",
                   active: true,
                 },
                 {
                   step: "Tap.",
-                  body: "Start a session with one tap. Sync with fellow reciters and prepare your audio recording environment.",
+                  body: "Start a majlis session with one tap and invite fellow reciters. Everyone opens the same kalaam instantly.",
                   active: false,
                 },
                 {
                   step: "Practice.",
-                  body: "Recite in practice mode and get real-time scoring on accuracy, flow, and pause. Track weak lines across sessions.",
+                  body: "Rehearse in practice mode and get feedback on your recitation — line by line, so you know exactly what to work on.",
                   active: false,
+                  soon: true,
                 },
                 {
                   step: "Recite.",
-                  body: "Focus only on the words. Our distraction-free interface highlights the active line as you breathe.",
+                  body: "The host taps the line being recited and every screen follows. No one loses their place.",
                   active: false,
                 },
               ].map((s) => (
@@ -328,8 +227,13 @@ export default function Home() {
                       s.active ? "bg-secondary" : "bg-outline-variant"
                     }`}
                   />
-                  <h3 className="text-3xl md:text-4xl text-primary font-bold tracking-tight">
+                  <h3 className="text-3xl md:text-4xl text-primary font-bold tracking-tight flex items-center gap-3">
                     {s.step}
+                    {s.soon && (
+                      <span className="px-2.5 py-1 rounded-full bg-[#E8F3EE] border border-[#054A29]/10 font-mono text-[10px] tracking-[0.1em] text-[#054A29] font-bold uppercase">
+                        Coming soon
+                      </span>
+                    )}
                   </h3>
                   <p className="text-on-surface-variant mt-4 text-base md:text-lg">
                     {s.body}
@@ -434,16 +338,16 @@ export default function Home() {
               Why Bayaaz.
             </h2>
             <p className="text-on-surface-variant mt-6 text-lg md:text-xl max-w-sm">
-              We&apos;re not building a social network. We&apos;re building a
-              tool for your craft.
+              Other apps carry the same popular kalaams. We go looking for the
+              ones that deserve to be heard.
             </p>
           </div>
           <div className="space-y-6">
             {[
-              ["Algorithmic feed", "Your bayaaz, sorted by you."],
-              ["Distracting notifications", "Focus mode by default."],
+              ["Only the famous few", "Underrated poets, given their place."],
+              ["Lost in old diaries", "Purane kalaam, preserved and searchable."],
+              ["Heard once, never found again", "Anjuman kalaams, kept for everyone."],
               ["Cloud-only access", "Full offline functionality."],
-              ["Locked data", "Export your collection anytime."],
             ].map(([bad, good]) => (
               <div
                 key={bad}
@@ -477,6 +381,10 @@ export default function Home() {
           <h2 className="text-[44px] md:text-[64px] lg:text-[96px] leading-[0.95] tracking-tight mb-10 md:mb-12 font-extrabold">
             Make your bayaaz.
           </h2>
+          <p className="max-w-[520px] text-base md:text-lg opacity-80 -mt-4 md:-mt-6 mb-10 md:mb-12">
+            Know a kalaam that deserves to be heard? Send it to us and we&apos;ll
+            add it to the collection.
+          </p>
           <div className="flex flex-col sm:flex-row gap-4 md:gap-6">
             <a
               href="mailto:kumailappdev@gmail.com?subject=BAYAAZ%20%E2%80%94%20Beta%20access%20request&body=Hi%20BAYAAZ%20team%2C%0A%0AI%E2%80%99d%20love%20early%20access%20to%20BAYAAZ.%20Please%20add%20me%20to%20the%20beta%20and%20let%20me%20know%20how%20I%20can%20start%20using%20it.%0A%0A(Optional)%20A%20bit%20about%20me%3A%0A%E2%80%A2%20Name%3A%0A%E2%80%A2%20I%E2%80%99m%20a%3A%20zakir%20%2F%20poet%20%2F%20listener%20%2F%20other%0A%E2%80%A2%20Device%3A%20iPhone%20%2F%20Android%0A%0AThank%20you!"
@@ -485,10 +393,10 @@ export default function Home() {
               Get Started for free
             </a>
             <a
-              href="mailto:kumailappdev@gmail.com?subject=BAYAAZ%20support%20request"
+              href="mailto:kumailappdev@gmail.com?subject=BAYAAZ%20%E2%80%94%20Kalaam%20suggestion&body=Kalaam%20title%3A%0APoet%20%2F%20anjuman%3A%0ACategory%20(nauha%20%2F%20marsiya%20%2F%20qasida%20%2F%20qata)%3A%0ALyrics%20or%20a%20link%3A%0A"
               className="bg-primary-container text-on-primary-container border border-white/20 px-8 py-4 rounded-2xl text-base md:text-lg font-semibold hover:bg-white/10 transition-colors text-center"
             >
-              Contact Support
+              Suggest a kalaam
             </a>
           </div>
         </div>

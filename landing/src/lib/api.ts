@@ -99,6 +99,44 @@ export async function getKalaam(id: string): Promise<Kalaam | null> {
   }
 }
 
+export type SiteStats = {
+  kalaams: number;
+  poets: number;
+  /** Registered users. Null when only the fallback (index) was reachable. */
+  reciters: number | null;
+  /** Majlis sessions held. Null when only the fallback was reachable. */
+  majalis: number | null;
+};
+
+/**
+ * Live counters for the home page. Uses /kalaams/stats, falling back to
+ * counting the public index (kalaams + poets only). Null if the API is down.
+ */
+export async function getSiteStats(): Promise<SiteStats | null> {
+  try {
+    const res = await fetch(`${API_URL}/kalaams/stats`, {
+      next: { revalidate: REVALIDATE_SECONDS, tags: ["kalaams"] },
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (res.ok) return (await res.json()) as SiteStats;
+  } catch {
+    // fall through to the index
+  }
+  const index = await getKalaamIndex();
+  if (index.length === 0) return null;
+  const poets = new Set(
+    index.map((k) => k.poet?.trim().toLowerCase()).filter(Boolean),
+  );
+  return { kalaams: index.length, poets: poets.size, reciters: null, majalis: null };
+}
+
+/** 1240 → "1.2k", 12 → "12". */
+export function formatCount(n: number): string {
+  if (n < 1000) return String(n);
+  const k = n / 1000;
+  return `${k >= 10 ? Math.round(k) : k.toFixed(1).replace(/\.0$/, "")}k`;
+}
+
 // ─── Slugs ─────────────────────────────────────────────────────────────────
 // URLs look like /kalaam/mujhe-awaaz-do-aaye-mere-baba-6a1c271dea5d5e07cc8b3e95.
 // The Mongo id at the end is the real key, so titles can change freely
