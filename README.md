@@ -81,6 +81,10 @@ The app talks to `https://api.mybayaaz.com` (see `client/lib/config/app_config.d
 
 **Admins:** only admins can add kalaams. Grant the role with `cd server && node scripts/make-admin.js you@example.com` (`--revoke` to remove), then sign in at `https://www.mybayaaz.com/admin`. For Google sign-in on the admin panel, add `https://www.mybayaaz.com` (and `http://localhost:3000` for dev) under *Authorized JavaScript origins* of the Google OAuth web client.
 
+**People (shayars / nauha khwans):** kalaams link to a shared People table (`server/model/Person.js`). Admins pick names with autocomplete in the editor; new names are added on save. The website browses *category → person → kalaams* (`/nauha/<person>`). After first deploying this, run `cd server && node scripts/migrate-people.js --apply` once to turn existing `poet` strings into People.
+
+**Reference audio/video:** admins attach it in the editor (uploaded from the browser straight to R2). It plays above the lyrics on the website, and on the app's reading screen.
+
 **AI practice** (Listen scoring + AI Coach) is paused via `kAiPracticeEnabled` in `client/lib/config/app_config.dart`.
 
 ---

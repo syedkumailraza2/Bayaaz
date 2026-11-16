@@ -387,10 +387,46 @@ class ReferenceAudioService {
   }) async {
     final db = IsarService.instance.db;
     final existing = await db.kalaamReferenceAudios.getByKalaamId(kalaamId);
-    if (existing != null && await File(existing.localWavPath).exists()) {
+    // A YouTube-link reference that an admin has since swapped for another
+    // video must be re-fetched; anything else cached is still good.
+    final staleYouTube = existing != null &&
+        media.sourceType == 'youtube' &&
+        existing.sourceUrl != null &&
+        existing.sourceUrl != (media.sourceUrl ?? media.url);
+    if (existing != null &&
+        !staleYouTube &&
+        await File(existing.localWavPath).exists()) {
       return true;
     }
     if (media.url.isEmpty) return false;
+
+    // Reference set as a YouTube *link* (web admin): there is no file on R2,
+    // so pull the audio from YouTube on-device, as the app's own YouTube
+    // import does.
+    final linkOnly = media.sourceType == 'youtube' &&
+        VideoId.parseVideoId(media.url) != null;
+    if (linkOnly) {
+      try {
+        final fetched = await fetchYouTubeAudio(media.sourceUrl ?? media.url);
+        if (fetched == null) return false;
+        final outPath = await extractAndNormalize(
+          fetched.file,
+          kalaamId,
+          extension: fetched.extension,
+        );
+        await saveReference(
+          kalaamId: kalaamId,
+          wavPath: outPath,
+          sourceType: 'youtube',
+          sourceUrl: media.sourceUrl ?? media.url,
+          durationMs: fetched.durationMs,
+        );
+        return true;
+      } catch (e) {
+        debugPrint('[reference] YouTube fetch failed for $kalaamId: $e');
+        return false;
+      }
+    }
 
     final dir = await getApplicationDocumentsDirectory();
     final outDir = Directory('${dir.path}/reference_audio');

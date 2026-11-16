@@ -12,6 +12,34 @@ class KalaamAuthor {
       );
 }
 
+/// A shayar or nauha khwan linked to a kalaam (from the server's People table).
+class KalaamPerson {
+  final String name;
+  final String slug;
+
+  const KalaamPerson({required this.name, this.slug = ''});
+
+  factory KalaamPerson.fromJson(Map<String, dynamic> json) => KalaamPerson(
+        name: json['name']?.toString() ?? '',
+        slug: json['slug']?.toString() ?? '',
+      );
+
+  static List<KalaamPerson> listFrom(dynamic raw) => raw is List
+      ? raw
+          .whereType<Map>()
+          .map((m) => KalaamPerson.fromJson(Map<String, dynamic>.from(m)))
+          .where((p) => p.name.isNotEmpty)
+          .toList()
+      : const [];
+}
+
+/// "A, B and C"
+String joinPersonNames(List<KalaamPerson> people) {
+  final names = people.map((p) => p.name).toList();
+  if (names.length <= 1) return names.isEmpty ? '' : names.first;
+  return '${names.sublist(0, names.length - 1).join(', ')} and ${names.last}';
+}
+
 class Stanza {
   final int stanzaNumber;
   final List<String> lines;
@@ -59,6 +87,10 @@ class KalaamModel {
   // Synced from the server so a second device can re-download the file
   // instead of being limited to whatever lives in the uploader's app-docs.
   final KalaamReferenceMedia? referenceAudio;
+  // Who wrote it / who recites it. Empty for kalaams cached before the
+  // People release (the legacy `poet` string still carries the shayar).
+  final List<KalaamPerson> shayars;
+  final List<KalaamPerson> reciters;
 
   KalaamModel({
     required this.id,
@@ -76,6 +108,8 @@ class KalaamModel {
     this.savesCount = 0,
     this.savedByMe = false,
     this.referenceAudio,
+    this.shayars = const [],
+    this.reciters = const [],
   });
 
   // Flat preview text for card display (first stanza, first 3 lines)
@@ -101,6 +135,8 @@ class KalaamModel {
     bool? savedByMe,
     KalaamReferenceMedia? referenceAudio,
     bool clearReferenceAudio = false,
+    List<KalaamPerson>? shayars,
+    List<KalaamPerson>? reciters,
   }) {
     return KalaamModel(
       id: id ?? this.id,
@@ -120,6 +156,8 @@ class KalaamModel {
       referenceAudio: clearReferenceAudio
           ? null
           : (referenceAudio ?? this.referenceAudio),
+      shayars: shayars ?? this.shayars,
+      reciters: reciters ?? this.reciters,
     );
   }
 
@@ -147,6 +185,8 @@ class KalaamModel {
                 Map<String, dynamic>.from(json['referenceAudio'] as Map),
               )
             : null,
+        shayars: KalaamPerson.listFrom(json['shayars']),
+        reciters: KalaamPerson.listFrom(json['reciters']),
       );
 }
 

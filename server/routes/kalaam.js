@@ -2,10 +2,12 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const Kalaam = require('../model/Kalaam');
 const User = require('../model/User');
+const Person = require('../model/Person');
 const auth = require('../middleware/auth');
 const requireAdmin = require('../middleware/requireAdmin');
 const { isAdmin } = require('../middleware/requireAdmin');
 const r2 = require('../services/r2');
+const { youtubeId, watchUrl } = require('../services/youtube');
 
 const router = express.Router();
 
@@ -134,7 +136,7 @@ router.get('/', async (req, res) => {
 router.get('/index', async (req, res) => {
   try {
     const items = await Kalaam.find({ isPublic: true })
-      .select('title category poet updatedAt')
+      .select('title category poet shayars reciters updatedAt')
       .sort({ updatedAt: -1 })
       .lean();
     res.set('Cache-Control', 'public, max-age=300');
@@ -143,12 +145,37 @@ router.get('/index', async (req, res) => {
       title: k.title,
       category: k.category,
       poet: k.poet || null,
+      shayars: personLinks(k.shayars),
+      reciters: personLinks(k.reciters),
       updatedAt: k.updatedAt,
     })));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
+
+// Apply shayars / reciters from a create/update body.
+//   shayars, reciters — arrays of names (or a comma-separated string)
+//   poet              — legacy string from older app builds; used for
+//                       shayars when `shayars` isn't sent
+// Only admins may add new people to the People table; for everyone else
+// unknown names are dropped from the lists (but kept in the legacy `poet`).
+async function applyPeople(kalaam, body, userId) {
+  const create = await isAdmin(userId);
+  const has = (k) => Object.prototype.hasOwnProperty.call(body, k);
+  if (has('shayars')) {
+    kalaam.shayars = await Person.refsFromNames(body.shayars, { create });
+    kalaam.poet = kalaam.shayars.map((p) => p.name).join(', ') || undefined;
+  } else if (has('poet')) {
+    kalaam.poet = body.poet;
+    kalaam.shayars = await Person.refsFromNames(body.poet, { create });
+  }
+  if (has('reciters')) {
+    kalaam.reciters = await Person.refsFromNames(body.reciters, { create });
+  }
+}
+
+const personLinks = (refs) => (refs || []).map((p) => ({ name: p.name, slug: p.slug }));
 
 // GET /api/kalaams/stats — public counters for the website's KPI strip.
 // Cheap counts only; cached 5 min at the edge.
@@ -380,16 +407,17 @@ router.get('/:id', async (req, res) => {
 // POST /api/kalaams — create (admins only)
 router.post('/', auth, requireAdmin, async (req, res) => {
   try {
-    const { title, content, category, isPublic, poet, tags } = req.body;
-    const kalaam = await Kalaam.create({
+    const { title, content, category, isPublic, tags } = req.body;
+    const kalaam = new Kalaam({
       title,
       content,
       category,
       isPublic: isPublic !== undefined ? isPublic : true,
-      poet,
       tags: Array.isArray(tags) ? tags : [],
       author: req.user.id,
     });
+    await applyPeople(kalaam, req.body, req.user.id);
+    await kalaam.save();
     await kalaam.populate('author', 'name avatar');
     // A freshly created kalaam can't be in anyone's saved list yet, so an
     // empty savedSet is correct (and skips the User lookup).
@@ -406,8 +434,9 @@ router.put('/:id', auth, async (req, res) => {
     if (!kalaam) return res.status(404).json({ message: 'Not found' });
     if (!(await canManage(kalaam, req.user.id))) return res.status(403).json({ message: 'Forbidden' });
 
-    const { title, content, category, isPublic, poet, tags } = req.body;
-    Object.assign(kalaam, { title, content, category, isPublic, poet, tags: Array.isArray(tags) ? tags : kalaam.tags });
+    const { title, content, category, isPublic, tags } = req.body;
+    Object.assign(kalaam, { title, content, category, isPublic, tags: Array.isArray(tags) ? tags : kalaam.tags });
+    await applyPeople(kalaam, req.body, req.user.id);
     await kalaam.save();
     await kalaam.populate('author', 'name avatar');
     const savedSet = await loadSavedSet(req.user.id);
@@ -478,7 +507,13 @@ router.post('/:id/reference/presign', auth, async (req, res) => {
 router.post('/:id/reference', auth, async (req, res) => {
   try {
     const { url, sourceType, sourceUrl, durationMs, extension } = req.body || {};
-    if (!isValidReferenceUrl(url)) {
+    // YouTube link only (web admin): no file was uploaded, so `url` is the
+    // canonical watch URL itself. The app fetches the audio on-device.
+    const linkOnlyId = sourceType === 'youtube' && !url ? youtubeId(sourceUrl) : null;
+    if (sourceType === 'youtube' && !url && !linkOnlyId) {
+      return res.status(400).json({ message: 'Not a valid YouTube link' });
+    }
+    if (!linkOnlyId && !isValidReferenceUrl(url)) {
       return res
         .status(400)
         .json({ message: 'Invalid reference URL — must be on the configured R2 public host' });
@@ -488,6 +523,22 @@ router.post('/:id/reference', auth, async (req, res) => {
     if (!kalaam) return res.status(404).json({ message: 'Not found' });
     if (!(await canManage(kalaam, req.user.id))) {
       return res.status(403).json({ message: 'Forbidden' });
+    }
+
+    const previousUrl = kalaam.referenceAudio && kalaam.referenceAudio.url;
+    if (linkOnlyId) {
+      kalaam.referenceAudio = {
+        url: watchUrl(linkOnlyId),
+        sourceType: 'youtube',
+        sourceUrl: watchUrl(linkOnlyId),
+        durationMs: 0,
+        extension: '',
+        uploadedAt: new Date(),
+      };
+      await kalaam.save();
+      if (previousUrl) r2.deleteByPublicUrl(previousUrl).catch(() => {});
+      await kalaam.populate('author', 'name avatar');
+      return res.json(fmt(kalaam, req.user.id, await loadSavedSet(req.user.id)));
     }
 
     const safeSourceType = ['audio_file', 'video_file', 'youtube'].includes(sourceType)
@@ -508,6 +559,12 @@ router.post('/:id/reference', auth, async (req, res) => {
       uploadedAt: new Date(),
     };
     await kalaam.save();
+    // Replacing a reference: drop the old R2 object (no-op for YouTube links).
+    if (previousUrl && previousUrl !== url) {
+      r2.deleteByPublicUrl(previousUrl).catch((err) => {
+        console.warn('[r2] delete failed for', previousUrl, err.message);
+      });
+    }
     await kalaam.populate('author', 'name avatar');
 
     const savedSet = await loadSavedSet(req.user.id);

@@ -3,7 +3,7 @@
 // Browser-side helpers for the admin panel. The API (Express on Render)
 // already allows cross-origin requests, so the panel talks to it directly
 // with the same JWT the mobile app uses.
-import { API_URL, type Category, type Kalaam } from "@/lib/api";
+import { API_URL, type Category, type Kalaam, type ReferenceMedia } from "@/lib/api";
 
 const TOKEN_KEY = "bayaaz:admin-token";
 const USER_KEY = "bayaaz:admin-user";
@@ -109,7 +109,9 @@ export async function verifySession(): Promise<AdminUser | null> {
 export type KalaamInput = {
   title: string;
   category: Category;
-  poet?: string;
+  /** Names; new ones are added to the People table on save (admins). */
+  shayars: string[];
+  reciters: string[];
   tags: string[];
   isPublic: boolean;
   content: { stanzaNumber: number; lines: string[] }[];
@@ -144,6 +146,91 @@ export const toggleVisibility = (id: string) =>
 
 export const deleteKalaam = (id: string) =>
   apiFetch<{ message: string }>(`/kalaams/${id}`, { method: "DELETE" });
+
+// ─── People (shayars / nauha khwans) ───────────────────────────────────────
+
+export type Person = { id: string; name: string; slug: string };
+
+export const searchPeople = (q: string) =>
+  apiFetch<Person[]>(`/people?q=${encodeURIComponent(q)}&limit=8`);
+
+// ─── Reference audio / video ───────────────────────────────────────────────
+
+export const REFERENCE_EXTS = [
+  "mp3", "m4a", "aac", "wav", "ogg", "opus", "flac",
+  "mp4", "mov", "webm", "mkv",
+] as const;
+const VIDEO_EXTS = new Set(["mp4", "mov", "webm", "mkv"]);
+
+export function fileExtension(file: File) {
+  return (file.name.split(".").pop() || "").toLowerCase();
+}
+
+/** Duration in ms read from the file's metadata in the browser (0 if unknown). */
+function measureDuration(file: File): Promise<number> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const el = document.createElement(VIDEO_EXTS.has(fileExtension(file)) ? "video" : "audio");
+    const done = (ms: number) => {
+      URL.revokeObjectURL(url);
+      resolve(ms);
+    };
+    el.preload = "metadata";
+    el.onloadedmetadata = () => done(Number.isFinite(el.duration) ? Math.round(el.duration * 1000) : 0);
+    el.onerror = () => done(0);
+    setTimeout(() => done(0), 8000);
+    el.src = url;
+  });
+}
+
+/**
+ * Upload a reference audio/video for a kalaam: presign on the API, PUT the
+ * bytes straight to R2 (with progress), then record it on the kalaam.
+ */
+export async function uploadReference(
+  kalaamId: string,
+  file: File,
+  onProgress: (fraction: number) => void,
+): Promise<Kalaam> {
+  const extension = fileExtension(file);
+  const presign = await apiFetch<{ uploadUrl: string; publicUrl: string; contentType: string }>(
+    `/kalaams/${kalaamId}/reference/presign`,
+    { method: "POST", body: JSON.stringify({ extension }) },
+  );
+  await new Promise<void>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", presign.uploadUrl);
+    xhr.setRequestHeader("Content-Type", presign.contentType);
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
+    xhr.onload = () =>
+      xhr.status >= 200 && xhr.status < 300
+        ? resolve()
+        : reject(new Error(`Upload failed (${xhr.status})`));
+    xhr.onerror = () => reject(new Error("Upload failed — check your connection."));
+    xhr.send(file);
+  });
+  const durationMs = await measureDuration(file);
+  const media: ReferenceMedia = {
+    url: presign.publicUrl,
+    sourceType: VIDEO_EXTS.has(extension) ? "video_file" : "audio_file",
+    extension,
+    durationMs,
+  };
+  return apiFetch<Kalaam>(`/kalaams/${kalaamId}/reference`, {
+    method: "POST",
+    body: JSON.stringify(media),
+  });
+}
+
+/** Use a YouTube video as the reference (stored as a link, not a file). */
+export const setYouTubeReference = (kalaamId: string, link: string) =>
+  apiFetch<Kalaam>(`/kalaams/${kalaamId}/reference`, {
+    method: "POST",
+    body: JSON.stringify({ sourceType: "youtube", sourceUrl: link.trim() }),
+  });
+
+export const removeReference = (kalaamId: string) =>
+  apiFetch<Kalaam>(`/kalaams/${kalaamId}/reference`, { method: "DELETE" });
 
 /** Ask the website to rebuild its public pages after a change. Best-effort. */
 export async function refreshPublicPages() {

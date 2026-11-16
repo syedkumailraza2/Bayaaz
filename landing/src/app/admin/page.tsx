@@ -123,7 +123,16 @@ function KalaamTable() {
                 <tr key={k._id} className="border-t border-outline-variant/40">
                   <td className="p-3">
                     <div className="font-medium">{k.title}</div>
-                    {k.poet ? <div className="text-outline">{k.poet}</div> : null}
+                    {k.reciters?.length || k.poet ? (
+                      <div className="text-outline">
+                        {[
+                          k.reciters?.map((p) => p.name).join(", "),
+                          k.poet ? `by ${k.poet}` : null,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </div>
+                    ) : null}
                   </td>
                   <td className="p-3">{CATEGORY_INFO[k.category]?.label ?? k.category}</td>
                   <td className="p-3">{authorName(k)}</td>

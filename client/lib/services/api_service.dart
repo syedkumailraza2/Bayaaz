@@ -369,6 +369,15 @@ class ApiService {
     throw Exception('Failed to load saved kalaams');
   }
 
+  /// Latest copy of one kalaam (people, reference media, counters).
+  static Future<KalaamModel> getKalaam(String id) async {
+    final res = await http
+        .get(Uri.parse('$kBaseUrl/kalaams/$id'), headers: await _authHeaders())
+        .timeout(const Duration(seconds: 15));
+    if (res.statusCode == 200) return KalaamModel.fromJson(jsonDecode(res.body));
+    throw Exception('Failed to load kalaam');
+  }
+
   static Future<KalaamModel> toggleVisibility(String id) async {
     final res = await http.patch(
       Uri.parse('$kBaseUrl/kalaams/$id/visibility'),

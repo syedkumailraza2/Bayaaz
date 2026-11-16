@@ -784,6 +784,33 @@ class KalaamProvider extends ChangeNotifier {
     }
   }
 
+  /// Re-fetch one kalaam (e.g. when its detail screen opens) so lists that
+  /// were filled from the offline cache pick up fields the cache doesn't
+  /// store: reciters/shayars and the reference audio/video. Engagement
+  /// state (likes/saves) keeps the in-memory value, which may hold an
+  /// optimistic update the server hasn't echoed yet.
+  Future<KalaamModel?> refreshKalaam(String id) async {
+    if (!_isOnline) return null;
+    try {
+      final fresh = await ApiService.getKalaam(id);
+      for (final list in [_feed, _myKalaams, _savedKalaams, _searchResults]) {
+        final idx = list.indexWhere((k) => k.id == id);
+        if (idx == -1) continue;
+        final cur = list[idx];
+        list[idx] = fresh.copyWith(
+          likedByMe: cur.likedByMe,
+          likesCount: cur.likesCount,
+          savedByMe: cur.savedByMe,
+          savesCount: cur.savesCount,
+        );
+      }
+      notifyListeners();
+      return fresh;
+    } catch (_) {
+      return null;
+    }
+  }
+
   void _replaceInList(List<KalaamModel> list, KalaamModel updated) {
     final idx = list.indexWhere((k) => k.id == updated.id);
     if (idx != -1) list[idx] = updated;

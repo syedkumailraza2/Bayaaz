@@ -78,6 +78,7 @@ if (!isServerless) {
 
 app.use('/api/auth', authRoutes);
 app.use('/api/kalaams', kalaamRoutes);
+app.use('/api/people', require('./routes/people'));
 app.use('/api/groups', groupRoutes);
 app.use('/api/sessions', sessionRoutes);
 app.use('/api/invites', inviteRoutes);

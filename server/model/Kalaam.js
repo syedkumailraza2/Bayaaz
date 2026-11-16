@@ -20,13 +20,27 @@ const referenceAudioSchema = new mongoose.Schema({
   uploadedAt: { type: Date, default: Date.now },
 }, { _id: false });
 
+// Embedded copy of a Person (model/Person.js): the id for joins/renames plus
+// name + slug so feeds and the website can render links without a lookup.
+const personRefSchema = new mongoose.Schema({
+  person: { type: mongoose.Schema.Types.ObjectId, ref: 'Person', required: true },
+  name: { type: String, required: true },
+  slug: { type: String, required: true },
+}, { _id: false });
+
 const kalaamSchema = new mongoose.Schema({
   title: { type: String, required: true, trim: true },
   content: { type: [stanzaSchema], required: true, validate: v => v.length > 0 },
   category: { type: String, required: true, enum: CATEGORIES },
   isPublic: { type: Boolean, default: true },
   author: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  // Legacy free-text poet. Kept in sync with `shayars` (names joined by
+  // ", ") so older app builds still show and search it.
   poet: { type: String, trim: true },
+  // Who wrote it (shayar) and who recites it (nauha khwan / reciter).
+  // Both can hold several people; names come from the shared People table.
+  shayars: { type: [personRefSchema], default: [] },
+  reciters: { type: [personRefSchema], default: [] },
   tags: [{ type: String, trim: true }],
   // Stored as an array of user IDs so we can answer "did *I* like this?"
   // without a join. Routes return only `likesCount` + `likedByMe` to keep
@@ -47,6 +61,9 @@ const kalaamSchema = new mongoose.Schema({
   // any device opening the kalaam can fetch and play it locally.
   referenceAudio: { type: referenceAudioSchema, default: null },
 }, { timestamps: true });
+
+kalaamSchema.index({ 'shayars.person': 1 });
+kalaamSchema.index({ 'reciters.person': 1 });
 
 // Shape a kalaam for the client: omit the raw `likes` array (which can grow
 // unbounded) and emit `likesCount` + `likedByMe`. Pass the requesting user's
