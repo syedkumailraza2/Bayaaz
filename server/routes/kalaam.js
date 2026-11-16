@@ -7,6 +7,7 @@ const auth = require('../middleware/auth');
 const requireAdmin = require('../middleware/requireAdmin');
 const { isAdmin } = require('../middleware/requireAdmin');
 const r2 = require('../services/r2');
+const { youtubeId, watchUrl } = require('../services/youtube');
 
 const router = express.Router();
 
@@ -506,7 +507,13 @@ router.post('/:id/reference/presign', auth, async (req, res) => {
 router.post('/:id/reference', auth, async (req, res) => {
   try {
     const { url, sourceType, sourceUrl, durationMs, extension } = req.body || {};
-    if (!isValidReferenceUrl(url)) {
+    // YouTube link only (web admin): no file was uploaded, so `url` is the
+    // canonical watch URL itself. The app fetches the audio on-device.
+    const linkOnlyId = sourceType === 'youtube' && !url ? youtubeId(sourceUrl) : null;
+    if (sourceType === 'youtube' && !url && !linkOnlyId) {
+      return res.status(400).json({ message: 'Not a valid YouTube link' });
+    }
+    if (!linkOnlyId && !isValidReferenceUrl(url)) {
       return res
         .status(400)
         .json({ message: 'Invalid reference URL — must be on the configured R2 public host' });
@@ -516,6 +523,22 @@ router.post('/:id/reference', auth, async (req, res) => {
     if (!kalaam) return res.status(404).json({ message: 'Not found' });
     if (!(await canManage(kalaam, req.user.id))) {
       return res.status(403).json({ message: 'Forbidden' });
+    }
+
+    const previousUrl = kalaam.referenceAudio && kalaam.referenceAudio.url;
+    if (linkOnlyId) {
+      kalaam.referenceAudio = {
+        url: watchUrl(linkOnlyId),
+        sourceType: 'youtube',
+        sourceUrl: watchUrl(linkOnlyId),
+        durationMs: 0,
+        extension: '',
+        uploadedAt: new Date(),
+      };
+      await kalaam.save();
+      if (previousUrl) r2.deleteByPublicUrl(previousUrl).catch(() => {});
+      await kalaam.populate('author', 'name avatar');
+      return res.json(fmt(kalaam, req.user.id, await loadSavedSet(req.user.id)));
     }
 
     const safeSourceType = ['audio_file', 'video_file', 'youtube'].includes(sourceType)
@@ -536,6 +559,12 @@ router.post('/:id/reference', auth, async (req, res) => {
       uploadedAt: new Date(),
     };
     await kalaam.save();
+    // Replacing a reference: drop the old R2 object (no-op for YouTube links).
+    if (previousUrl && previousUrl !== url) {
+      r2.deleteByPublicUrl(previousUrl).catch((err) => {
+        console.warn('[r2] delete failed for', previousUrl, err.message);
+      });
+    }
     await kalaam.populate('author', 'name avatar');
 
     const savedSet = await loadSavedSet(req.user.id);

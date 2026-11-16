@@ -2,13 +2,14 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { CATEGORIES, CATEGORY_INFO, type Category, type Kalaam } from "@/lib/api";
+import { CATEGORIES, CATEGORY_INFO, youtubeId, type Category, type Kalaam } from "@/lib/api";
 import {
   createKalaam,
   fileExtension,
   REFERENCE_EXTS,
   refreshPublicPages,
   removeReference,
+  setYouTubeReference,
   stanzasToText,
   textToStanzas,
   updateKalaam,
@@ -36,6 +37,9 @@ export default function KalaamEditor({ existing }: { existing?: Kalaam }) {
   const [reciters, setReciters] = useState<Chip[]>(toChips(existing?.reciters));
   const media = existing?.referenceAudio ?? null;
   const [newFile, setNewFile] = useState<File | null>(null);
+  // Pasted YouTube link (alternative to uploading a file).
+  const [ytLink, setYtLink] = useState("");
+  const ytId = youtubeId(ytLink);
   const [removeMedia, setRemoveMedia] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
   const [tags, setTags] = useState((existing?.tags ?? []).join(", "));
@@ -51,6 +55,7 @@ export default function KalaamEditor({ existing }: { existing?: Kalaam }) {
     setError(null);
     if (!title.trim()) return setError("Title is required.");
     if (stanzas.length === 0) return setError("Add at least one line of lyrics.");
+    if (ytLink.trim() && !ytId) return setError("That doesn't look like a YouTube link.");
     setSaving(true);
     const input = {
       title: title.trim(),
@@ -64,8 +69,10 @@ export default function KalaamEditor({ existing }: { existing?: Kalaam }) {
     let saved: Kalaam | null = null;
     try {
       saved = existing ? await updateKalaam(existing._id, input) : await createKalaam(input);
-      if (removeMedia && media && !newFile) await removeReference(saved._id);
-      if (newFile) {
+      if (removeMedia && media && !newFile && !ytId) await removeReference(saved._id);
+      if (ytId) {
+        await setYouTubeReference(saved._id, ytLink);
+      } else if (newFile) {
         setProgress(0);
         await uploadReference(saved._id, newFile, setProgress);
       }
@@ -98,6 +105,7 @@ export default function KalaamEditor({ existing }: { existing?: Kalaam }) {
     }
     setError(null);
     setNewFile(file);
+    setYtLink("");
     setRemoveMedia(false);
   }
 
@@ -175,11 +183,11 @@ export default function KalaamEditor({ existing }: { existing?: Kalaam }) {
       <fieldset className="rounded-xl hairline p-4 space-y-3">
         <legend className="text-sm font-medium px-1">Reference audio / video</legend>
         <p className="text-xs text-outline -mt-1">
-          Plays above the lyrics on the website and in the app. Audio (mp3, m4a, wav…)
-          or video (mp4, mov, webm).
+          Plays above the lyrics on the website and in the app. Upload audio (mp3, m4a,
+          wav…) or video (mp4, mov, webm), or paste a YouTube link.
         </p>
 
-        {media && !removeMedia && !newFile ? (
+        {media && !removeMedia && !newFile && !ytId ? (
           <ReferencePlayer media={media} title={title || "this kalaam"} />
         ) : null}
 
@@ -201,6 +209,36 @@ export default function KalaamEditor({ existing }: { existing?: Kalaam }) {
           </div>
         ) : null}
 
+        <label className="block">
+          <span className="text-xs font-medium text-on-surface-variant">YouTube link</span>
+          <input
+            type="url"
+            inputMode="url"
+            value={ytLink}
+            onChange={(e) => {
+              setYtLink(e.target.value);
+              if (e.target.value.trim()) {
+                setNewFile(null);
+                setRemoveMedia(false);
+              }
+            }}
+            placeholder="https://www.youtube.com/watch?v=… or https://youtu.be/…"
+            className="mt-1 w-full rounded-lg hairline px-3 py-2 bg-white text-sm"
+          />
+          {ytLink.trim() && !ytId ? (
+            <span className="block text-xs text-red-700 mt-1">Not a YouTube video link.</span>
+          ) : null}
+        </label>
+        {ytId ? (
+          <ReferencePlayer
+            media={{ url: `https://www.youtube.com/watch?v=${ytId}`, sourceType: "youtube" }}
+            title={title || "this kalaam"}
+          />
+        ) : null}
+        {ytId && media ? (
+          <p className="text-xs text-outline -mt-2">This link replaces the current reference when you save.</p>
+        ) : null}
+
         <div className="flex flex-wrap gap-3">
           <label className="rounded-lg hairline px-4 py-2 text-sm cursor-pointer hover:bg-surface-container-low">
             {media || newFile ? "Choose a different file" : "Choose audio or video"}
@@ -211,7 +249,7 @@ export default function KalaamEditor({ existing }: { existing?: Kalaam }) {
               className="sr-only"
             />
           </label>
-          {media && !newFile ? (
+          {media && !newFile && !ytId ? (
             <button
               type="button"
               onClick={() => setRemoveMedia((r) => !r)}

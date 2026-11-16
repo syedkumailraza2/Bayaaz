@@ -222,6 +222,13 @@ export async function uploadReference(
   });
 }
 
+/** Use a YouTube video as the reference (stored as a link, not a file). */
+export const setYouTubeReference = (kalaamId: string, link: string) =>
+  apiFetch<Kalaam>(`/kalaams/${kalaamId}/reference`, {
+    method: "POST",
+    body: JSON.stringify({ sourceType: "youtube", sourceUrl: link.trim() }),
+  });
+
 export const removeReference = (kalaamId: string) =>
   apiFetch<Kalaam>(`/kalaams/${kalaamId}/reference`, { method: "DELETE" });
 

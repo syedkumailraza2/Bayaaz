@@ -168,6 +168,32 @@ export function formatCount(n: number): string {
   return `${k >= 10 ? Math.round(k) : k.toFixed(1).replace(/\.0$/, "")}k`;
 }
 
+// ─── YouTube ───────────────────────────────────────────────────────────────
+// Same rules as server/services/youtube.js.
+
+const YT_HOSTS = new Set([
+  "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com",
+  "youtube-nocookie.com", "www.youtube-nocookie.com", "youtu.be",
+]);
+
+/** Video id from any common YouTube URL shape, or null. */
+export function youtubeId(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  let u: URL;
+  try {
+    u = new URL(raw.trim());
+  } catch {
+    return null;
+  }
+  const host = u.hostname.toLowerCase();
+  if (!/^https?:$/.test(u.protocol) || !YT_HOSTS.has(host)) return null;
+  let id: string | null | undefined;
+  if (host === "youtu.be") id = u.pathname.split("/")[1];
+  else if (u.pathname === "/watch") id = u.searchParams.get("v");
+  else id = u.pathname.match(/^\/(?:shorts|live|embed|v)\/([^/?#]+)/)?.[1];
+  return id && /^[A-Za-z0-9_-]{11}$/.test(id) ? id : null;
+}
+
 // ─── People (shayars / reciters) ───────────────────────────────────────────
 
 export type PersonSummary = PersonLink & { count: number };
